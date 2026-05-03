@@ -1,0 +1,862 @@
+<Window x:Class="MitsubishiMonitor.Demo.Views.DeviceDetailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:lvc="clr-namespace:LiveCharts.Wpf;assembly=LiveCharts.Wpf"
+        xmlns:controls="clr-namespace:MitsubishiMonitor.Demo.Controls"
+        Title="设备详情"
+        WindowState="Maximized"
+        WindowStartupLocation="CenterScreen"
+        Background="#0A0E17"
+        FontFamily="Microsoft Yahei UI"
+        FontSize="14"
+        TextElement.Foreground="#E0E0E0"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        xmlns:converters="clr-namespace:MitsubishiMonitor.Demo.Converters">
+
+    <Window.Resources>
+        <converters:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        
+        <!-- 科技感渐变画刷 -->
+        <LinearGradientBrush x:Key="TechGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#00D4FF" Offset="0"/>
+            <GradientStop Color="#0099FF" Offset="0.5"/>
+            <GradientStop Color="#0066FF" Offset="1"/>
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="SuccessGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#00FF88" Offset="0"/>
+            <GradientStop Color="#00CC66" Offset="1"/>
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="WarningGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#FFAA00" Offset="0"/>
+            <GradientStop Color="#FF8800" Offset="1"/>
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="AlertGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#FF6B6B" Offset="0"/>
+            <GradientStop Color="#FF4444" Offset="1"/>
+        </LinearGradientBrush>
+
+        <!-- 呼吸灯动画 -->
+        <Storyboard x:Key="BreathAnimation" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                           From="0.4" To="1" Duration="0:0:1.5" AutoReverse="True"/>
+        </Storyboard>
+
+        <!-- 脉冲动画 -->
+        <Storyboard x:Key="PulseAnimation" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                           From="1" To="1.1" Duration="0:0:1" AutoReverse="True"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                           From="1" To="1.1" Duration="0:0:1" AutoReverse="True"/>
+            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                           From="1" To="0.5" Duration="0:0:1" AutoReverse="True"/>
+        </Storyboard>
+
+        <!-- 卡片样式 - 带动态效果 -->
+        <Style x:Key="CardStyle" TargetType="Border">
+            <Setter Property="Background">
+                <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#0D1520" Offset="0"/>
+                        <GradientStop Color="#0A121D" Offset="1"/>
+                    </LinearGradientBrush>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="BorderBrush" Value="#1E2D3D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Padding" Value="20"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect Color="#000000" Opacity="0.3" BlurRadius="10" ShadowDepth="2"/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="RenderTransform">
+                <Setter.Value>
+                    <ScaleTransform ScaleX="1" ScaleY="1" CenterX="0.5" CenterY="0.5"/>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Trigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <ColorAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Color)"
+                                                To="#00D4FF" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Opacity)"
+                                               To="0.5" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.BlurRadius)"
+                                               To="25" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                               To="1.02" Duration="0:0:0.3">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CubicEase EasingMode="EaseOut"/>
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                               To="1.02" Duration="0:0:0.3">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CubicEase EasingMode="EaseOut"/>
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <ColorAnimation Storyboard.TargetProperty="BorderBrush.(SolidColorBrush.Color)"
+                                               To="#00D4FF" Duration="0:0:0.3"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <ColorAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Color)"
+                                                To="#000000" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Opacity)"
+                                               To="0.3" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.BlurRadius)"
+                                               To="10" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                               To="1" Duration="0:0:0.3">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CubicEase EasingMode="EaseOut"/>
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                               To="1" Duration="0:0:0.3">
+                                    <DoubleAnimation.EasingFunction>
+                                        <CubicEase EasingMode="EaseOut"/>
+                                    </DoubleAnimation.EasingFunction>
+                                </DoubleAnimation>
+                                <ColorAnimation Storyboard.TargetProperty="BorderBrush.(SolidColorBrush.Color)"
+                                               To="#1E2D3D" Duration="0:0:0.3"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 统计卡片样式 - 带扫描线效果 -->
+        <Style x:Key="StatCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
+            <!-- 使用最小高度，避免内容被裁剪，同时保持三张卡片整体高度一致 -->
+            <Setter Property="MinHeight" Value="170"/>
+            <Setter Property="ClipToBounds" Value="False"/>
+        </Style>
+
+        <!-- 标题样式 -->
+        <Style x:Key="SectionTitle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#8892B0"/>
+            <Setter Property="Margin" Value="0,0,0,16"/>
+        </Style>
+
+        <!-- 时间范围按钮样式 -->
+        <Style x:Key="TimeRangeButton" TargetType="Button">
+            <Setter Property="Background" Value="#0D1520"/>
+            <Setter Property="Foreground" Value="#7D8590"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="20,10"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="TimeRangeButtonActive" TargetType="Button" BasedOn="{StaticResource TimeRangeButton}">
+            <Setter Property="Background" Value="#238636"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="52"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 科技背景网格 - 与主界面保持一致 -->
+        <Grid x:Name="BackgroundGrid" Grid.RowSpan="2">
+            <Grid.Background>
+                <DrawingBrush TileMode="Tile" Viewport="0,0,40,40" ViewportUnits="Absolute">
+                    <DrawingBrush.Drawing>
+                        <GeometryDrawing>
+                            <GeometryDrawing.Geometry>
+                                <RectangleGeometry Rect="0,0,40,40"/>
+                            </GeometryDrawing.Geometry>
+                            <GeometryDrawing.Brush>
+                                <SolidColorBrush Color="#0D1520" Opacity="0.5"/>
+                            </GeometryDrawing.Brush>
+                        </GeometryDrawing>
+                    </DrawingBrush.Drawing>
+                </DrawingBrush>
+            </Grid.Background>
+        </Grid>
+
+        <!-- 标题栏 -->
+        <Grid Grid.Row="0" Background="#0A0E17" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="20,0,0,0">
+                <Border Width="36" Height="36" Background="#F0883E" CornerRadius="8">
+                    <TextBlock Text="📊" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <TextBlock Text="{Binding CurrentDevice.Name}" FontSize="18" FontWeight="SemiBold"
+                           VerticalAlignment="Center" Margin="12,0,0,0" Foreground="#C9D1D9"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <Button Content="—" Width="50" Height="40" Background="Transparent"
+                        Foreground="#7D8590" Click="Minimize_Click" FontSize="14"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button x:Name="MaximizeButton" Content="□" Width="50" Height="40" Background="Transparent"
+                        Foreground="#7D8590" Click="Maximize_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button Content="✕" Width="50" Height="40" Background="Transparent"
+                        Foreground="#7D8590" Click="Close_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" Width="50" Height="40">
+                                            <ContentPresenter x:Name="CP" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#DA3633"/>
+                                                <Setter TargetName="CP" Property="TextElement.Foreground" Value="White"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 主内容 -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <Grid Margin="20">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="0,0,0,16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 设备概览 -->
+                    <Border Grid.Column="0" Style="{StaticResource StatCardStyle}" Margin="0,0,8,0" ClipToBounds="True">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource TechGradient}" Opacity="0.25"
+                                    RenderTransformOrigin="0.5,0">
+                                <Border.RenderTransform>
+                                    <TranslateTransform Y="0"/>
+                                </Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="140" Duration="0:0:3"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+                            
+                            <StackPanel VerticalAlignment="Center" Margin="0,4,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding CurrentDevice.Name}" FontSize="22" FontWeight="Bold" Foreground="#E6EDF3" TextTrimming="CharacterEllipsis"/>
+                                    <Border Grid.Column="1" CornerRadius="12" Padding="10,3" Background="{Binding CurrentDevice.StatusColor}" VerticalAlignment="Center" Margin="8,0,0,0">
+                                        <TextBlock Text="{Binding CurrentDevice.StatusDisplay}" FontSize="12" FontWeight="SemiBold" Foreground="White"/>
+                                    </Border>
+                                </Grid>
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Border Background="#161B22" CornerRadius="4" Padding="6,3" Margin="0,0,8,0" BorderBrush="#30363D" BorderThickness="1">
+                                        <TextBlock Text="{Binding CurrentDevice.IpAddress, StringFormat=IP: {0}}" FontSize="12" Foreground="#8B949E" FontFamily="Consolas"/>
+                                    </Border>
+                                </StackPanel>
+                                <Border Background="#161B22" CornerRadius="4" Padding="6,3" Margin="0,6,0,0" BorderBrush="#30363D" BorderThickness="1" HorizontalAlignment="Left">
+                                    <TextBlock Text="{Binding CurrentDevice.LastUpdateTime, StringFormat=更新: HH:mm:ss}" FontSize="12" Foreground="#8B949E" FontFamily="Consolas"/>
+                                </Border>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Border Background="#161B22" CornerRadius="4" Padding="6,3" Margin="0,0,8,0" BorderBrush="#30363D" BorderThickness="1">
+                                        <TextBlock Text="{Binding TargetTemperatureDisplay, StringFormat=目标: {0}}" FontSize="12" Foreground="#8B949E" FontFamily="Consolas"/>
+                                    </Border>
+                                </StackPanel>
+                                <Border Visibility="{Binding IsAlarm, Converter={StaticResource BooleanToVisibilityConverter}}" 
+                                        Background="#FF4444" CornerRadius="4" Padding="8,4" Margin="0,8,0,0" HorizontalAlignment="Left">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="⚠️ 温度报警" FontSize="12" FontWeight="Bold" Foreground="White" Margin="0,0,8,0"/>
+                                        <Button Content="🔄 复位" Command="{Binding AcknowledgeAlarmCommand}" 
+                                                Background="White" Foreground="#FF4444" BorderThickness="0" 
+                                                Padding="8,2" Cursor="Hand" FontSize="11" FontWeight="Bold"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Visibility="{Binding IsSsrFault, Converter={StaticResource BooleanToVisibilityConverter}}" 
+                                        Background="#FF8800" CornerRadius="4" Padding="8,4" Margin="0,6,0,0" HorizontalAlignment="Left">
+                                    <TextBlock Text="⚠️ 固态继电器故障" FontSize="12" FontWeight="Bold" Foreground="White"/>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 总操作次数（可点击跳转到操作日志） -->
+                    <Border Grid.Column="1" Style="{StaticResource StatCardStyle}" Margin="0,0,8,0" ClipToBounds="True"
+                            Cursor="Hand" MouseLeftButtonUp="OperationCountCard_Click"
+                            ToolTip="点击查看操作日志">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource TechGradient}" Opacity="0.25"
+                                    RenderTransformOrigin="0.5,0">
+                                <Border.RenderTransform>
+                                    <TranslateTransform Y="0"/>
+                                </Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="140" Duration="0:0:3"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+
+                            <StackPanel VerticalAlignment="Center" Margin="0,4,0,0">
+                                <TextBlock Text="总操作次数" Style="{StaticResource SectionTitle}" Foreground="#58A6FF"/>
+                                <TextBlock Text="{Binding TotalOperationCount}" FontSize="40" FontWeight="SemiBold" Foreground="#58A6FF" FontFamily="Consolas" HorizontalAlignment="Center"/>
+                                <!-- 点击提示 -->
+                                <TextBlock Text="📋 点击查看日志 →" FontSize="11" Foreground="#2A4A6A"
+                                           HorizontalAlignment="Center" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 温度报警阈值设置 -->
+                    <Border Grid.Column="2" Style="{StaticResource StatCardStyle}" ClipToBounds="True">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource AlertGradient}" Opacity="0.25"
+                                    RenderTransformOrigin="0.5,0">
+                                <Border.RenderTransform>
+                                    <TranslateTransform Y="0"/>
+                                </Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="140" Duration="0:0:3"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource AlertGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+                            
+                            <StackPanel VerticalAlignment="Center" Margin="0,4,0,0">
+                                <TextBlock Text="🌡️ 温度报警阈值" Style="{StaticResource SectionTitle}" Foreground="#FF6B6B" Margin="0,0,0,4" FontSize="14"/>
+                                
+                                <!-- 显示模式 -->
+                                <StackPanel Visibility="{Binding IsThresholdEditing, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
+                                    <TextBlock FontSize="36" FontWeight="Bold" Foreground="#FF6B6B" FontFamily="Consolas" HorizontalAlignment="Center">
+                                        <Run Text="{Binding TemperatureThreshold, StringFormat={}{0:F1}}"/><Run Text="°C" FontSize="22"/>
+                                    </TextBlock>
+                                    <TextBlock Text="超过此值自动标记异常" FontSize="12" Foreground="#7D8590" HorizontalAlignment="Center" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                    <Button Content="⚙️ 修改" Command="{Binding StartThresholdEditCommand}" 
+                                            Background="#0D1520" Foreground="#FF6B6B" BorderBrush="#FF4444" BorderThickness="1"
+                                            Padding="14,5" Margin="0,10,0,0" HorizontalAlignment="Center" Cursor="Hand" FontSize="12"/>
+                                </StackPanel>
+                                
+                                <!-- 编辑模式 -->
+                                <StackPanel Visibility="{Binding IsThresholdEditing, Converter={StaticResource BooleanToVisibilityConverter}}" Margin="0,8,0,0">
+                                    <TextBlock Text="设置新阈值" FontSize="12" Foreground="#FF6B6B" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+                                    <TextBox Text="{Binding TemperatureThreshold, UpdateSourceTrigger=PropertyChanged}" 
+                                             FontSize="24" FontWeight="Bold" FontFamily="Consolas"
+                                             HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                                             Background="#161B22" Foreground="#FF6B6B" BorderBrush="#FF4444" BorderThickness="1"
+                                             Padding="6" Height="42" Margin="0,0,0,10"/>
+                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                                        <Button Content="✓" Command="{Binding SaveTemperatureThresholdCommand}"
+                                                Background="#238636" Foreground="White" BorderThickness="0"
+                                                Padding="16,6" Margin="0,0,6,0" Cursor="Hand" FontSize="12"/>
+                                        <Button Content="✕" Command="{Binding CancelThresholdEditCommand}"
+                                                Background="#0D1520" Foreground="#7D8590" BorderBrush="#30363D" BorderThickness="1"
+                                                Padding="16,6" Cursor="Hand" FontSize="12"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- 工具栏 -->
+                <Border Grid.Row="1" Style="{StaticResource CardStyle}" Margin="0,0,0,16" ClipToBounds="True">
+                    <Grid>
+                        <!-- 扫描线效果 -->
+                        <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                Background="{StaticResource TechGradient}" Opacity="0.2"
+                                RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
+                            <Border.RenderTransform>
+                                <TranslateTransform Y="0"/>
+                            </Border.RenderTransform>
+                            <Border.Triggers>
+                                <EventTrigger RoutedEvent="Border.Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard RepeatBehavior="Forever">
+                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                           From="0" To="60" Duration="0:0:3"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Border.Triggers>
+                        </Border>
+                        <Grid Margin="0,2,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="时间范围" FontSize="15" Foreground="#7D8590" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                                <Button Content="今日" Command="{Binding ChangeTimeRangeCommand}" CommandParameter="今日">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource TimeRangeButton}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SelectedTimeRange}" Value="今日">
+                                                    <Setter Property="Background" Value="#238636"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                                <Button Content="本周" Command="{Binding ChangeTimeRangeCommand}" CommandParameter="本周">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource TimeRangeButton}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SelectedTimeRange}" Value="本周">
+                                                    <Setter Property="Background" Value="#238636"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                                <Button Content="本月" Command="{Binding ChangeTimeRangeCommand}" CommandParameter="本月">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource TimeRangeButton}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SelectedTimeRange}" Value="本月">
+                                                    <Setter Property="Background" Value="#238636"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                                <Button Content="全部" Command="{Binding ChangeTimeRangeCommand}" CommandParameter="全部">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource TimeRangeButton}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding SelectedTimeRange}" Value="全部">
+                                                    <Setter Property="Background" Value="#238636"/>
+                                                    <Setter Property="Foreground" Value="White"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Content="刷新" Command="{Binding RefreshCommand}" Background="#0D1520" Foreground="#00D4FF"
+                                        Padding="18,10" BorderThickness="1" BorderBrush="#1E3D50" Cursor="Hand" Margin="0,0,10,0" FontSize="14"/>
+                                <Button Content="导出Excel" Command="{Binding ExportToExcelCommand}" Background="#238636" Foreground="White"
+                                        Padding="20,10" BorderThickness="0" Cursor="Hand" FontSize="14"/>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
+
+                <!-- ============ 有电压设备：温度+电压合并图表 ============ -->
+                <Grid Grid.Row="2"
+                      Visibility="{Binding HasVoltage, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Border Style="{StaticResource CardStyle}" ClipToBounds="True">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource TechGradient}" Opacity="0.3"
+                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
+                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="500" Duration="0:0:4"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+                            <StackPanel>
+                                <!-- 标题行 + 电压数值 -->
+                                <Grid Margin="0,0,0,8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="🌡️ 温度 &amp; 加热棒电压" Style="{StaticResource SectionTitle}" Foreground="#F0883E" Margin="0"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                        <Border Background="#161B22" CornerRadius="4" Padding="8,4" Margin="0,0,8,0" BorderBrush="#30363D" BorderThickness="1">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="8" Height="8" Fill="#F5B73B" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                <TextBlock Text="A相" FontSize="12" Foreground="#7D8590" Margin="0,0,6,0"/>
+                                                <TextBlock Text="{Binding PhaseAVoltage}" FontSize="12" Foreground="#F5B73B" FontFamily="Consolas"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Background="#161B22" CornerRadius="4" Padding="8,4" Margin="0,0,8,0" BorderBrush="#30363D" BorderThickness="1">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="8" Height="8" Fill="#4CAF50" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                <TextBlock Text="B相" FontSize="12" Foreground="#7D8590" Margin="0,0,6,0"/>
+                                                <TextBlock Text="{Binding PhaseBVoltage}" FontSize="12" Foreground="#4CAF50" FontFamily="Consolas"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Background="#161B22" CornerRadius="4" Padding="8,4" BorderBrush="#30363D" BorderThickness="1">
+                                            <StackPanel Orientation="Horizontal">
+                                                <Ellipse Width="8" Height="8" Fill="#58A6FF" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                <TextBlock Text="C相" FontSize="12" Foreground="#7D8590" Margin="0,0,6,0"/>
+                                                <TextBlock Text="{Binding PhaseCVoltage}" FontSize="12" Foreground="#58A6FF" FontFamily="Consolas"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </StackPanel>
+                                </Grid>
+
+                                <!-- 图表 (双Y轴) -->
+                                <lvc:CartesianChart x:Name="CombinedChart" LegendLocation="Top" Height="320">
+                                    <lvc:CartesianChart.AxisX>
+                                        <lvc:Axis x:Name="XAxis" Title="时间" FontSize="12"/>
+                                    </lvc:CartesianChart.AxisX>
+                                    <lvc:CartesianChart.AxisY>
+                                        <lvc:Axis x:Name="YAxisLeft" Title="温度(°C)" FontSize="12" Foreground="#F0883E"/>
+                                        <lvc:Axis x:Name="YAxisRight" Title="电压(V)" Position="RightTop" FontSize="12" Foreground="#58A6FF"/>
+                                    </lvc:CartesianChart.AxisY>
+                                </lvc:CartesianChart>
+
+                                <!-- 加热诊断信息 -->
+                                <Border Background="#0D1520" CornerRadius="6" Padding="12,8" Margin="0,8,0,0" BorderBrush="#1E2D3D" BorderThickness="1">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding HeatingDiagnosis}" FontSize="12" Foreground="#7D8590" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                                            <TextBlock Text="10分钟预测：" FontSize="12" Foreground="#7D8590"/>
+                                            <TextBlock Text="{Binding PredictedTemperatureDisplay}" FontSize="14" Foreground="#F0883E" FontWeight="SemiBold" FontFamily="Consolas"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- ============ 无电压设备（1号）：温度图表 + 工艺看板 ============ -->
+                <Grid Grid.Row="2"
+                      Visibility="{Binding HasVoltage, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="2*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 左侧：纯温度曲线卡片 -->
+                    <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,8,0" ClipToBounds="True">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource TechGradient}" Opacity="0.3"
+                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
+                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="500" Duration="0:0:4"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource SectionTitle}" Foreground="#F0883E" Margin="0,0,0,8">
+                                    <Run Text="🌡️ 反应槽温度（"/><Run Text="{Binding PlcConfig.TemperatureAddress, Mode=OneWay}"/><Run Text="）"/>
+                                </TextBlock>
+                                <lvc:CartesianChart x:Name="TempOnlyChart" LegendLocation="None" Height="320">
+                                    <lvc:CartesianChart.AxisX>
+                                        <lvc:Axis x:Name="XAxisNoVoltage" Title="时间" FontSize="12"/>
+                                    </lvc:CartesianChart.AxisX>
+                                    <lvc:CartesianChart.AxisY>
+                                        <lvc:Axis Title="温度(°C)" FontSize="12" Foreground="#F0883E"/>
+                                    </lvc:CartesianChart.AxisY>
+                                </lvc:CartesianChart>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- 右侧：工艺看板（阶段状态 + 计时器） -->
+                    <Border Grid.Column="1" Style="{StaticResource CardStyle}" ClipToBounds="True">
+                        <Grid>
+                            <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
+                                    Background="{StaticResource SuccessGradient}" Opacity="0.3"
+                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
+                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
+                                <Border.Triggers>
+                                    <EventTrigger RoutedEvent="Border.Loaded">
+                                        <BeginStoryboard>
+                                            <Storyboard RepeatBehavior="Forever">
+                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                                                               From="0" To="600" Duration="0:0:4"/>
+                                            </Storyboard>
+                                        </BeginStoryboard>
+                                    </EventTrigger>
+                                </Border.Triggers>
+                            </Border>
+                            <Border BorderBrush="{StaticResource SuccessGradient}" BorderThickness="0,0,0,2"
+                                    HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <StackPanel>
+                                    <!-- 当前阶段指示 -->
+                                    <TextBlock Text="⚡ 工艺流程" Style="{StaticResource SectionTitle}" Foreground="#00FF88" Margin="0,0,0,4"/>
+                                    <Border Background="#0D1520" CornerRadius="8" Padding="12,8" Margin="0,0,0,16" BorderBrush="#1A3D2A" BorderThickness="1">
+                                        <StackPanel>
+                                            <TextBlock Text="当前阶段" FontSize="11" Foreground="#7D8590"/>
+                                            <TextBlock Text="{Binding CurrentProcessStage}" FontSize="20" FontWeight="Bold" Foreground="#00FF88" FontFamily="Consolas" Margin="0,4,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+
+                                    <!-- 工艺阶段列表 -->
+                                    <ItemsControl ItemsSource="{Binding ProcessStageItems}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Margin="0,0,0,4" CornerRadius="6" Padding="10,6" BorderThickness="1">
+                                                    <Border.Style>
+                                                        <Style TargetType="Border">
+                                                            <Setter Property="Background" Value="#0D1520"/>
+                                                            <Setter Property="BorderBrush" Value="#1E2D3D"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                                    <Setter Property="Background" Value="#0A1F14"/>
+                                                                    <Setter Property="BorderBrush" Value="#00FF88"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </Border.Style>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*"/>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <TextBlock Grid.Column="0" Text="{Binding StageName}" FontSize="13" VerticalAlignment="Center">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Foreground" Value="#7D8590"/>
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                                            <Setter Property="Foreground" Value="#C9D1D9"/>
+                                                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                        <TextBlock Grid.Column="1" Text="{Binding StatusText}" FontSize="11" VerticalAlignment="Center" FontFamily="Consolas">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Setter Property="Foreground" Value="#3D4450"/>
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                                            <Setter Property="Foreground" Value="#00FF88"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+
+                                    <!-- 寄存器已移至公共 Row 3，所有设备共用 -->
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Grid>
+                    </Border>
+                </Grid>
+
+                <!-- ============ C/D/T 寄存器面板（所有设备共用，HasCRegisters 时显示） ============ -->
+                <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,16,0,0" ClipToBounds="True"
+                        Visibility="{Binding HasCRegisters, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="⏱ 寄存器 / 计时器" FontSize="14" FontWeight="SemiBold" Foreground="#00D4FF" Margin="0,0,0,10"/>
+                        <ItemsControl ItemsSource="{Binding CRegisterItems}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#161B22" CornerRadius="8" Padding="14,10" Margin="0,0,10,8"
+                                            BorderBrush="#1E2D3D" BorderThickness="1" MinWidth="180">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="{Binding Label}" FontSize="12" Foreground="#7D8590"/>
+                                                <TextBlock Text="{Binding Address}" FontSize="10" Foreground="#3D4450" FontFamily="Consolas"/>
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Value}" FontSize="20" FontWeight="Bold" Foreground="#00D4FF" FontFamily="Consolas"/>
+                                                <TextBlock Text="{Binding Unit}" FontSize="11" Foreground="#7D8590" VerticalAlignment="Bottom" Margin="4,0,0,2"/>
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- ============ 工艺流程面板（所有有 M 点标签的设备共用） ============ -->
+                <Border Grid.Row="4" Style="{StaticResource CardStyle}" Margin="0,16,0,0" ClipToBounds="True"
+                        Visibility="{Binding HasProcessStages, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Text="⚡ 工艺流程" Style="{StaticResource SectionTitle}" Foreground="#00FF88" Margin="0,0,0,4"/>
+                        <Border Background="#0D1520" CornerRadius="8" Padding="12,8" Margin="0,0,0,12" BorderBrush="#1A3D2A" BorderThickness="1">
+                            <StackPanel>
+                                <TextBlock Text="当前阶段" FontSize="11" Foreground="#7D8590"/>
+                                <TextBlock Text="{Binding CurrentProcessStage}" FontSize="20" FontWeight="Bold" Foreground="#00FF88" FontFamily="Consolas" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <ItemsControl ItemsSource="{Binding ProcessStageItems}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="0,0,8,6" CornerRadius="6" Padding="14,8" BorderThickness="1" MinWidth="180">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="Background" Value="#0D1520"/>
+                                                <Setter Property="BorderBrush" Value="#1E2D3D"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                        <Setter Property="Background" Value="#0A1F14"/>
+                                                        <Setter Property="BorderBrush" Value="#00FF88"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="{Binding StageName}" FontSize="13" VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#7D8590"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                                <Setter Property="Foreground" Value="#C9D1D9"/>
+                                                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Grid.Column="1" Text="{Binding StatusText}" FontSize="11" VerticalAlignment="Center" FontFamily="Consolas">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#3D4450"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                                <Setter Property="Foreground" Value="#00FF88"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- PLC 点位状态面板 -->
+                <Border Grid.Row="5" Style="{StaticResource CardStyle}" Margin="0,16,0,0" ClipToBounds="True">
+                    <controls:PlcPointPanel PlcStatus="{Binding PlcStatus}"
+                                            PlcConfig="{Binding PlcConfig}"
+                                            Height="450"/>
+                </Border>
+
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Window>

@@ -1,0 +1,37 @@
+## .NET Build outputs
+bin/
+obj/
+Release/
+publish/
+publish2/
+
+## Binary files
+*.dll
+*.exe
+*.pdb
+*.cache
+
+## Logs
+*.log
+
+## Local data / secrets
+*.db
+.env
+.env.*
+!.env.example
+
+## User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## VS Code / IDE
+.vscode/
+.vs/
+.cursor/
+.trae/
+
+## OS files
+Thumbs.db
+*.lnk

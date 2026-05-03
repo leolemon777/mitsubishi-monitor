@@ -1,0 +1,85 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:controls="clr-namespace:MitsubishiMonitor.Demo.Controls">
+
+    <!-- 指示灯控件样式 -->
+    <Style TargetType="controls:IndicatorLamp">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="controls:IndicatorLamp">
+                    <StackPanel x:Name="RootPanel" Margin="4">
+                        <!-- 指示灯 -->
+                        <Ellipse Width="50" Height="50"
+                                 x:Name="LampEllipse"
+                                 Fill="{TemplateBinding OffColor}"
+                                 Stroke="#505050"
+                                 StrokeThickness="2"
+                                 HorizontalAlignment="Center">
+                            <Ellipse.Effect>
+                                <DropShadowEffect x:Name="LampShadow"
+                                                  Color="#FFFFFF"
+                                                  BlurRadius="0"
+                                                  ShadowDepth="0"
+                                                  Opacity="0"/>
+                            </Ellipse.Effect>
+                        </Ellipse>
+
+                        <!-- 标签 -->
+                        <TextBlock Text="{TemplateBinding Label}"
+                                   FontSize="12"
+                                   Foreground="#B0B0B0"
+                                   HorizontalAlignment="Center"
+                                   Margin="0,4,0,0"/>
+
+                        <!-- 视觉状态管理 -->
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup Name="States">
+                                <VisualState Name="OnState">
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="LampEllipse"
+                                                        Storyboard.TargetProperty="(Ellipse.Fill).(SolidColorBrush.Color)"
+                                                        To="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=OnColor}"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampShadow"
+                                                        Storyboard.TargetProperty="(DropShadowEffect.BlurRadius)"
+                                                        To="20"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampShadow"
+                                                        Storyboard.TargetProperty="(DropShadowEffect.Opacity)"
+                                                        To="0.8"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampEllipse"
+                                                        Storyboard.TargetProperty="(UIElement.Opacity)"
+                                                        To="1"
+                                                        Duration="0:0:0.2"/>
+                                    </Storyboard>
+                                </VisualState>
+
+                                <VisualState Name="OffState">
+                                    <Storyboard>
+                                        <ColorAnimation Storyboard.TargetName="LampEllipse"
+                                                        Storyboard.TargetProperty="(Ellipse.Fill).(SolidColorBrush.Color)"
+                                                        To="{Binding RelativeSource={RelativeSource TemplatedParent}, Path=OffColor}"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampShadow"
+                                                        Storyboard.TargetProperty="(DropShadowEffect.BlurRadius)"
+                                                        To="0"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampShadow"
+                                                        Storyboard.TargetProperty="(DropShadowEffect.Opacity)"
+                                                        To="0"
+                                                        Duration="0:0:0.2"/>
+                                        <DoubleAnimation Storyboard.TargetName="LampEllipse"
+                                                        Storyboard.TargetProperty="(UIElement.Opacity)"
+                                                        To="0.5"
+                                                        Duration="0:0:0.2"/>
+                                    </Storyboard>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                    </StackPanel>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

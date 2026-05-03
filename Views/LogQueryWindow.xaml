@@ -1,0 +1,585 @@
+<Window x:Class="MitsubishiMonitor.Demo.Views.LogQueryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:MitsubishiMonitor.Demo.Converters"
+        Title="日志查询"
+        Width="1280" Height="780"
+        WindowStartupLocation="CenterOwner"
+        Background="#0A0E17"
+        FontFamily="Microsoft Yahei UI"
+        TextElement.Foreground="#E0E0E0"
+        WindowStyle="None"
+        AllowsTransparency="False"
+        ResizeMode="CanResize">
+    <Window.Resources>
+        <converters:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+
+        <Style x:Key="ToolLabel" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#7D8590"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+        </Style>
+
+        <!-- 通用按钮 -->
+        <Style x:Key="TechBtn" TargetType="Button">
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="Background" Value="#0D1520"/>
+            <Setter Property="Foreground" Value="#7D8590"/>
+            <Setter Property="BorderBrush" Value="#1E3D50"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="14,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#00D4FF"/>
+                                <Setter Property="Foreground" Value="#00D4FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 时间范围：与 SelectedTimeRange 一致时高亮 -->
+        <Style x:Key="TimeRangeBtn" TargetType="Button" BasedOn="{StaticResource TechBtn}">
+            <Setter Property="MinWidth" Value="76"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="Margin" Value="0,0,4,0"/>
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=Content}" Value="今日"/>
+                        <Condition Binding="{Binding SelectedTimeRange, RelativeSource={RelativeSource AncestorType=Window}}" Value="今日"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#132F40"/>
+                    <Setter Property="BorderBrush" Value="#00D4FF"/>
+                    <Setter Property="Foreground" Value="#00D4FF"/>
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=Content}" Value="本周"/>
+                        <Condition Binding="{Binding SelectedTimeRange, RelativeSource={RelativeSource AncestorType=Window}}" Value="本周"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#132F40"/>
+                    <Setter Property="BorderBrush" Value="#00D4FF"/>
+                    <Setter Property="Foreground" Value="#00D4FF"/>
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=Content}" Value="本月"/>
+                        <Condition Binding="{Binding SelectedTimeRange, RelativeSource={RelativeSource AncestorType=Window}}" Value="本月"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#132F40"/>
+                    <Setter Property="BorderBrush" Value="#00D4FF"/>
+                    <Setter Property="Foreground" Value="#00D4FF"/>
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=Content}" Value="全部"/>
+                        <Condition Binding="{Binding SelectedTimeRange, RelativeSource={RelativeSource AncestorType=Window}}" Value="全部"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Background" Value="#132F40"/>
+                    <Setter Property="BorderBrush" Value="#00D4FF"/>
+                    <Setter Property="Foreground" Value="#00D4FF"/>
+                </MultiDataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 自定义 ComboBox：默认 Popup 是白底 + 系统色，导致下拉列表「白底淡字」看不清 -->
+        <Style x:Key="DarkCombo" TargetType="ComboBox">
+            <Setter Property="Background" Value="#0D1520"/>
+            <Setter Property="Foreground" Value="#E8EAED"/>
+            <Setter Property="BorderBrush" Value="#1E3D50"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="MinWidth" Value="120"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="ItemContainerStyle">
+                <Setter.Value>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Background" Value="#0D1520"/>
+                        <Setter Property="Foreground" Value="#E8EAED"/>
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Setter Property="Padding" Value="10,8"/>
+                        <Setter Property="HorizontalContentAlignment" Value="Left"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ComboBoxItem">
+                                    <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                            BorderBrush="{TemplateBinding BorderBrush}"
+                                            BorderThickness="{TemplateBinding BorderThickness}"
+                                            Padding="{TemplateBinding Padding}">
+                                        <ContentPresenter/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsHighlighted" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid SnapsToDevicePixels="True">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- 外框：收起态深底 -->
+                            <Border x:Name="OuterBd" Grid.ColumnSpan="2"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}"
+                                    CornerRadius="2"/>
+                            <!-- 整块可点，展开下拉 -->
+                            <ToggleButton Grid.ColumnSpan="2"
+                                          Focusable="False"
+                                          Background="Transparent"
+                                          BorderThickness="0"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          ClickMode="Press">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent"/>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <!-- 已选文字（不拦截点击） -->
+                            <ContentPresenter Grid.Column="0"
+                                              Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"
+                                              IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
+                            <!-- 下拉箭头 -->
+                            <Path Grid.Column="1" Margin="0,0,10,0" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                  Fill="#00D4FF" Stretch="Uniform" Width="8" Height="5"
+                                  Data="M 0 0 L 4 5 L 8 0 Z"/>
+                            <!-- 下拉列表：深底亮字，与白底系统 Popup 彻底脱钩 -->
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Placement="Bottom"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   PopupAnimation="Fade"
+                                   Focusable="False"
+                                   StaysOpen="False">
+                                <Border Background="#0D1520"
+                                        BorderBrush="#00D4FF"
+                                        BorderThickness="1"
+                                        MinWidth="{Binding ActualWidth, ElementName=OuterBd}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <ScrollViewer Margin="0" SnapsToDevicePixels="True" CanContentScroll="True">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="OuterBd" Property="BorderBrush" Value="#00D4FF"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkText" TargetType="TextBox">
+            <Setter Property="Background" Value="#0D1520"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#1E3D50"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="MinWidth" Value="280"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="CaretBrush" Value="#00D4FF"/>
+        </Style>
+
+        <!-- DataGrid 暗色主题 -->
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="#0A1018"/>
+            <Setter Property="Foreground" Value="#C9D1D9"/>
+            <Setter Property="BorderBrush" Value="#1E2D3D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#1E2D3D"/>
+            <Setter Property="VerticalGridLinesBrush" Value="#1E2D3D"/>
+            <Setter Property="RowBackground" Value="#0D1520"/>
+            <Setter Property="AlternatingRowBackground" Value="#0F1922"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="CanUserResizeRows" Value="False"/>
+            <Setter Property="EnableRowVirtualization" Value="True"/>
+            <Setter Property="EnableColumnVirtualization" Value="True"/>
+            <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/>
+            <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
+            <Setter Property="ColumnHeaderHeight" Value="34"/>
+            <Setter Property="RowHeight" Value="28"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#0D1A26"/>
+            <Setter Property="Foreground" Value="#00D4FF"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="BorderBrush" Value="#1E2D3D"/>
+            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+        </Style>
+
+        <Style TargetType="DataGridCell">
+            <Setter Property="Padding" Value="10,2"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="DataGridCell">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#1F3548"/>
+                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style TargetType="DataGridRow">
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#142235"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- TabItem 暗色 -->
+        <Style TargetType="TabControl">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0,8,0,0"/>
+        </Style>
+
+        <Style TargetType="TabItem">
+            <Setter Property="Foreground" Value="#7D8590"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Padding" Value="20,8"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Bd" Padding="{TemplateBinding Padding}"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="#00D4FF" BorderThickness="0,0,0,2">
+                            <ContentPresenter ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#0D1520"/>
+                                <Setter Property="Foreground" Value="#00D4FF"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#E0E0E0"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="False">
+                                <Setter TargetName="Bd" Property="BorderThickness" Value="0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 主操作：导出 / 刷新（保持青色字） -->
+        <Style x:Key="PrimaryBtn" TargetType="Button" BasedOn="{StaticResource TechBtn}">
+            <Setter Property="Foreground" Value="#00D4FF"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48"/>     <!-- 标题栏 -->
+            <RowDefinition Height="Auto"/>   <!-- 工具栏 -->
+            <RowDefinition Height="*"/>      <!-- TabControl -->
+            <RowDefinition Height="Auto"/>   <!-- 状态栏 -->
+        </Grid.RowDefinitions>
+
+        <!-- 标题栏 -->
+        <Grid Grid.Row="0" Background="#0A0E17" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="20,0,0,0" VerticalAlignment="Center">
+                <Border Width="28" Height="28" CornerRadius="4">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                            <GradientStop Color="#00D4FF" Offset="0"/>
+                            <GradientStop Color="#0066FF" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <TextBlock Text="📑" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <TextBlock Text="日志查询" FontSize="14" FontWeight="SemiBold" Foreground="#E0E0E0"
+                           VerticalAlignment="Center" Margin="12,0,0,0"/>
+                <TextBlock Text="LOG QUERY" FontSize="10" Foreground="#4A5568"
+                           VerticalAlignment="Center" Margin="12,1,0,0" FontFamily="Consolas"/>
+            </StackPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button Content="─" Width="46" Height="48" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Minimize_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button Content="□" Width="46" Height="48" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Maximize_Click" FontSize="10"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button Content="✕" Width="46" Height="48" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Close_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" Width="46" Height="48">
+                                            <ContentPresenter x:Name="CP" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#FF4444"/>
+                                                <Setter TargetName="CP" Property="TextElement.Foreground" Value="White"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 工具栏：两行，分组更清晰 -->
+        <Border Grid.Row="1" Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="0,1,0,1" Padding="16,12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="12"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="设备" Style="{StaticResource ToolLabel}"/>
+                        <ComboBox Style="{StaticResource DarkCombo}"
+                                  ItemsSource="{Binding DeviceOptions}"
+                                  DisplayMemberPath="DisplayName"
+                                  SelectedItem="{Binding SelectedDevice, Mode=TwoWay}"
+                                  MinWidth="200"/>
+                    </StackPanel>
+
+                    <Border Grid.Column="1" Width="1" Height="26" VerticalAlignment="Center"
+                            Background="#2A3A4A" Margin="18,0"/>
+
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="时间" Style="{StaticResource ToolLabel}" Margin="0,0,10,0"/>
+                        <Border BorderBrush="#2A4A60" BorderThickness="1" CornerRadius="4"
+                                Padding="4,3" Background="#080C12" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal">
+                                <Button Content="今日" Style="{StaticResource TimeRangeBtn}"
+                                        Command="{Binding ChangeTimeRangeCommand}" CommandParameter="今日"/>
+                                <Button Content="本周" Style="{StaticResource TimeRangeBtn}"
+                                        Command="{Binding ChangeTimeRangeCommand}" CommandParameter="本周"/>
+                                <Button Content="本月" Style="{StaticResource TimeRangeBtn}"
+                                        Command="{Binding ChangeTimeRangeCommand}" CommandParameter="本月"/>
+                                <Button Content="全部" Style="{StaticResource TimeRangeBtn}" Margin="0,0,0,0"
+                                        Command="{Binding ChangeTimeRangeCommand}" CommandParameter="全部"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="🔄 刷新" Style="{StaticResource PrimaryBtn}"
+                                Command="{Binding RefreshCommand}" Margin="0,0,6,0"/>
+                        <Button Content="📥 导出 Excel" Style="{StaticResource PrimaryBtn}"
+                                Command="{Binding ExportCommand}"/>
+                        <TextBlock VerticalAlignment="Center" Margin="14,0,0,0" FontSize="12"
+                                   Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <Run Text="● " Foreground="#00D4FF"/>
+                            <Run Text="查询中…" Foreground="#B0BAC4"/>
+                        </TextBlock>
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Text="类型" Style="{StaticResource ToolLabel}"/>
+                        <ComboBox Style="{StaticResource DarkCombo}" Width="96" MinWidth="96"
+                                  ItemsSource="{Binding LogTypes}"
+                                  SelectedItem="{Binding SelectedLogType, Mode=TwoWay}"/>
+                    </StackPanel>
+                    <Border Grid.Column="1" Width="1" Height="26" VerticalAlignment="Center"
+                            Background="#2A3A4A" Margin="18,0"/>
+                    <Grid Grid.Column="2" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="搜索" Style="{StaticResource ToolLabel}"/>
+                        <TextBox Grid.Column="1" Style="{StaticResource DarkText}"
+                                 MinWidth="300" Margin="0,0,0,0"
+                                 Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="设备名 / 中文点位 / 地址 / 动作 / 描述（操作日志）或温度关键字（温度日志）"/>
+                    </Grid>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- 内容：Tab + 表格外框 + 空状态 / 加载遮罩 -->
+        <TabControl Grid.Row="2" Margin="12,0,12,8">
+            <TabItem Header="📋 操作日志">
+                <Border Background="#080C12" BorderBrush="#1E2D3D" BorderThickness="1"
+                        CornerRadius="4" ClipToBounds="True" Margin="0,4,0,0">
+                    <Grid MinHeight="200">
+                        <DataGrid ItemsSource="{Binding OperationLogsView}" Panel.ZIndex="0">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding LogTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="158"/>
+                                <DataGridTextColumn Header="设备" Binding="{Binding DeviceName}" Width="130"/>
+                                <DataGridTextColumn Header="类型" Binding="{Binding LogType}" Width="52"/>
+                                <DataGridTextColumn Header="地址" Binding="{Binding PointAddress}" Width="72"/>
+                                <DataGridTextColumn Header="中文点位" Binding="{Binding PointLabel}" MinWidth="160" Width="*"/>
+                                <DataGridTextColumn Header="动作" Binding="{Binding Action}" Width="72"/>
+                                <DataGridTextColumn Header="描述" Binding="{Binding Description}" MinWidth="200" Width="2*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <Border Panel.ZIndex="1" Background="#E80A1018"
+                                Visibility="{Binding ShowOperationEmptyState, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        MaxWidth="440" Margin="24">
+                                <TextBlock Text="📋" FontSize="32" Opacity="0.28" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+                                <TextBlock Text="{Binding OperationEmptyMessage}" Foreground="#B0BAC4"
+                                           FontSize="14" TextWrapping="Wrap" TextAlignment="Center" LineHeight="22"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Panel.ZIndex="2" Background="#DD0A0E17"
+                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                <TextBlock Text="正在查询数据…" Foreground="#00D4FF" FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock Text="请稍候" Foreground="#7D8590" FontSize="12" Margin="0,8,0,0" HorizontalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+            </TabItem>
+
+            <TabItem Header="🌡 温度日志">
+                <Border Background="#080C12" BorderBrush="#1E2D3D" BorderThickness="1"
+                        CornerRadius="4" ClipToBounds="True" Margin="0,4,0,0">
+                    <Grid MinHeight="200">
+                        <DataGrid ItemsSource="{Binding TemperatureLogsView}" Panel.ZIndex="0">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="时间" Binding="{Binding RecordTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="158"/>
+                                <DataGridTextColumn Header="设备" Binding="{Binding DeviceName}" Width="130"/>
+                                <DataGridTextColumn Header="温度(°C)" Binding="{Binding Temperature, StringFormat=F1}" Width="88"/>
+                                <DataGridTextColumn Header="A相电压" Binding="{Binding ThermocoupleA, StringFormat=F3}" Width="88"/>
+                                <DataGridTextColumn Header="B相电压" Binding="{Binding ThermocoupleB, StringFormat=F3}" Width="88"/>
+                                <DataGridTextColumn Header="C相电压" Binding="{Binding ThermocoupleC, StringFormat=F3}" Width="88"/>
+                                <DataGridTextColumn Header="是否异常" Binding="{Binding IsAbnormal}" Width="80"/>
+                                <DataGridTextColumn Header="阈值/目标" Binding="{Binding Threshold, StringFormat=F1}" MinWidth="100" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+
+                        <Border Panel.ZIndex="1" Background="#E80A1018"
+                                Visibility="{Binding ShowTemperatureEmptyState, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        MaxWidth="440" Margin="24">
+                                <TextBlock Text="🌡" FontSize="32" Opacity="0.28" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+                                <TextBlock Text="{Binding TemperatureEmptyMessage}" Foreground="#B0BAC4"
+                                           FontSize="14" TextWrapping="Wrap" TextAlignment="Center" LineHeight="22"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Panel.ZIndex="2" Background="#DD0A0E17"
+                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                <TextBlock Text="正在查询数据…" Foreground="#00D4FF" FontSize="14" FontWeight="SemiBold"/>
+                                <TextBlock Text="请稍候" Foreground="#7D8590" FontSize="12" Margin="0,8,0,0" HorizontalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+            </TabItem>
+        </TabControl>
+
+        <!-- 状态栏 -->
+        <Border Grid.Row="3" Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="0,1,0,0" Padding="0,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="{Binding StatusText}" Foreground="#B0BAC4"
+                           VerticalAlignment="Center" Margin="16,0,0,0" FontSize="12"/>
+                <TextBlock Grid.Column="1" Foreground="#7D8590"
+                           VerticalAlignment="Center" Margin="0,0,16,0" FontSize="11" FontFamily="Consolas">
+                    <Run Text="范围 "/>
+                    <Run Text="{Binding FilterStartDate, StringFormat=yyyy-MM-dd HH:mm}"/>
+                    <Run Text=" ~ "/>
+                    <Run Text="{Binding FilterEndDate, StringFormat=yyyy-MM-dd HH:mm}"/>
+                </TextBlock>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

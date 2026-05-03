@@ -1,0 +1,159 @@
+<UserControl x:Class="MitsubishiMonitor.Demo.Controls.PlcPointPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008" 
+             xmlns:controls="clr-namespace:MitsubishiMonitor.Demo.Controls"
+             mc:Ignorable="d" 
+             d:DesignHeight="450" d:DesignWidth="800">
+    
+    <UserControl.Resources>
+        <!-- 引入 PlcPointItem 样式 -->
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="PlcPointItemStyle.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    
+    <!-- 与 DeviceDetailWindow CardStyle 同系蓝深色，避免中性灰与外层卡片割裂 -->
+    <Grid Background="Transparent">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 标题栏和分组切换 -->
+        <Border Grid.Row="0"
+                Background="#0D1520"
+                BorderBrush="#1E2D3D"
+                BorderThickness="0,0,0,1"
+                Padding="12,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- 标题 -->
+                <TextBlock Grid.Column="0"
+                           Text="PLC 点位状态"
+                           FontSize="16"
+                           FontWeight="Bold"
+                           Foreground="#E0E0E0"
+                           VerticalAlignment="Center"/>
+
+                <!-- 分组切换按钮 -->
+                <StackPanel Grid.Column="2" 
+                            Orientation="Horizontal" 
+                            HorizontalAlignment="Right">
+                    <RadioButton x:Name="RadioAll"
+                                 Content="全部"
+                                 GroupName="PointGroup"
+                                 IsChecked="True"
+                                 Style="{StaticResource {x:Type RadioButton}}"
+                                 Margin="0,0,8,0"
+                                 Checked="OnGroupChanged"/>
+                    <RadioButton x:Name="RadioX"
+                                 Content="X 输入"
+                                 GroupName="PointGroup"
+                                 Style="{StaticResource {x:Type RadioButton}}"
+                                 Margin="0,0,8,0"
+                                 Checked="OnGroupChanged"/>
+                    <RadioButton x:Name="RadioY"
+                                 Content="Y 输出"
+                                 GroupName="PointGroup"
+                                 Style="{StaticResource {x:Type RadioButton}}"
+                                 Margin="0,0,8,0"
+                                 Checked="OnGroupChanged"/>
+                    <RadioButton x:Name="RadioM"
+                                 Content="M 辅助"
+                                 GroupName="PointGroup"
+                                 Style="{StaticResource {x:Type RadioButton}}"
+                                 Checked="OnGroupChanged"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 点位显示区域 -->
+        <ScrollViewer Grid.Row="1"
+                      Background="Transparent"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Padding="8">
+            <StackPanel x:Name="ContentPanel">
+                <!-- X 输入点位组 -->
+                <Border x:Name="XPointsGroup"
+                        Background="#0F1A28"
+                        BorderBrush="#1E2D3D"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Margin="0,0,0,12"
+                        Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="X 输入点位 (X0-X11)"
+                                   FontSize="14"
+                                   FontWeight="Bold"
+                                   Foreground="#4CAF50"
+                                   Margin="0,0,0,8"/>
+                        <ItemsControl x:Name="XPointsContainer">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- Y 输出点位组 -->
+                <Border x:Name="YPointsGroup"
+                        Background="#0F1A28"
+                        BorderBrush="#1E2D3D"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Margin="0,0,0,12"
+                        Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="Y 输出点位 (Y0-Y17)"
+                                   FontSize="14"
+                                   FontWeight="Bold"
+                                   Foreground="#2196F3"
+                                   Margin="0,0,0,8"/>
+                        <ItemsControl x:Name="YPointsContainer">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!-- M 辅助继电器组 -->
+                <Border x:Name="MPointsGroup"
+                        Background="#0F1A28"
+                        BorderBrush="#1E2D3D"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="12">
+                    <StackPanel>
+                        <TextBlock Text="M 辅助继电器 (M2553-M2554)"
+                                   FontSize="14"
+                                   FontWeight="Bold"
+                                   Foreground="#FF9800"
+                                   Margin="0,0,0,8"/>
+                        <ItemsControl x:Name="MPointsContainer">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

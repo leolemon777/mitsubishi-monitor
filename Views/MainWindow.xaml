@@ -1,0 +1,447 @@
+<Window x:Class="MitsubishiMonitor.Demo.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:MitsubishiMonitor.Demo.Converters"
+        xmlns:controls="clr-namespace:MitsubishiMonitor.Demo.Controls"
+        Title="工业设备监控系统" 
+        WindowState="Maximized"
+        WindowStartupLocation="CenterScreen"
+        Background="#0A0E17"
+        FontFamily="Microsoft Yahei UI"
+        TextElement.Foreground="#E0E0E0"
+        WindowStyle="None"
+        AllowsTransparency="False"
+        ResizeMode="CanResize">
+
+    <Window.Resources>
+        <converters:InverseBoolConverter x:Key="InverseBoolConverter"/>
+        <converters:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+        <converters:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibilityConverter"/>
+
+        <!-- 科技感渐变画刷 -->
+        <LinearGradientBrush x:Key="TechGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#00D4FF" Offset="0"/>
+            <GradientStop Color="#0099FF" Offset="0.5"/>
+            <GradientStop Color="#0066FF" Offset="1"/>
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="AlertGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#FF6B6B" Offset="0"/>
+            <GradientStop Color="#FF4444" Offset="1"/>
+        </LinearGradientBrush>
+
+        <LinearGradientBrush x:Key="SuccessGradient" StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#00FF88" Offset="0"/>
+            <GradientStop Color="#00CC66" Offset="1"/>
+        </LinearGradientBrush>
+
+        <!-- 脉冲动画 -->
+        <Storyboard x:Key="PulseAnimation" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                           From="1" To="1.1" Duration="0:0:1" AutoReverse="True"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                           From="1" To="1.1" Duration="0:0:1" AutoReverse="True"/>
+            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                           From="1" To="0.5" Duration="0:0:1" AutoReverse="True"/>
+        </Storyboard>
+
+        <!-- 扫描线动画 -->
+        <Storyboard x:Key="ScanLineAnimation" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
+                           From="0" To="200" Duration="0:0:2" AutoReverse="False"/>
+        </Storyboard>
+
+        <!-- 呼吸灯动画 -->
+        <Storyboard x:Key="BreathAnimation" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                           From="0.4" To="1" Duration="0:0:1.5" AutoReverse="True"/>
+        </Storyboard>
+
+        <!-- 设备卡片样式 -->
+        <Style x:Key="TechCardStyle" TargetType="Border">
+            <Setter Property="Background">
+                <Setter.Value>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#0D1520" Offset="0"/>
+                        <GradientStop Color="#0A121D" Offset="1"/>
+                    </LinearGradientBrush>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="BorderBrush" Value="#1E2D3D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect Color="#00D4FF" Opacity="0" BlurRadius="0" ShadowDepth="0"/>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="RenderTransform">
+                <Setter.Value>
+                    <ScaleTransform ScaleX="1" ScaleY="1" CenterX="0" CenterY="0"/>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Trigger.EnterActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.BlurRadius)"
+                                               To="20" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Opacity)"
+                                               To="0.3" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.ShadowDepth)"
+                                               To="0" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                               To="1.02" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                               To="1.02" Duration="0:0:0.3"/>
+                                <ColorAnimation Storyboard.TargetProperty="BorderBrush.(SolidColorBrush.Color)"
+                                               To="#00D4FF" Duration="0:0:0.3"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.EnterActions>
+                    <Trigger.ExitActions>
+                        <BeginStoryboard>
+                            <Storyboard>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.BlurRadius)"
+                                               To="0" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="Effect.(DropShadowEffect.Opacity)"
+                                               To="0" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)"
+                                               To="1" Duration="0:0:0.3"/>
+                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)"
+                                               To="1" Duration="0:0:0.3"/>
+                                <ColorAnimation Storyboard.TargetProperty="BorderBrush.(SolidColorBrush.Color)"
+                                               To="#1E2D3D" Duration="0:0:0.3"/>
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </Trigger.ExitActions>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 科技感按钮样式 -->
+        <Style x:Key="TechButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#0D1520"/>
+            <Setter Property="Foreground" Value="#00D4FF"/>
+            <Setter Property="BorderBrush" Value="#1E3D50"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="20,10"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontFamily" Value="Microsoft Yahei UI"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                            <Border.Effect>
+                                <DropShadowEffect Color="#00D4FF" Opacity="0.2" BlurRadius="8" ShadowDepth="0"/>
+                            </Border.Effect>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#00D4FF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#0D1D2D"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="64"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 科技背景网格 -->
+        <Grid x:Name="BackgroundGrid" Grid.RowSpan="2">
+            <Grid.Background>
+                <DrawingBrush TileMode="Tile" Viewport="0,0,40,40" ViewportUnits="Absolute">
+                    <DrawingBrush.Drawing>
+                        <GeometryDrawing>
+                            <GeometryDrawing.Geometry>
+                                <RectangleGeometry Rect="0,0,40,40"/>
+                            </GeometryDrawing.Geometry>
+                            <GeometryDrawing.Brush>
+                                <SolidColorBrush Color="#0D1520" Opacity="0.5"/>
+                            </GeometryDrawing.Brush>
+                        </GeometryDrawing>
+                    </DrawingBrush.Drawing>
+                </DrawingBrush>
+            </Grid.Background>
+        </Grid>
+
+        <!-- 标题栏 -->
+        <Grid Grid.Row="0" Background="#0A0E17" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Logo + 单位标识 -->
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="20,0,0,0" VerticalAlignment="Center">
+                <!-- 矢量 Logo：智造/工业自动化意象（六边形 + 芯线节点） -->
+                <Border Width="42" Height="42" CornerRadius="8" ClipToBounds="True"
+                        BorderBrush="#00D4FF" BorderThickness="1" VerticalAlignment="Center">
+                    <Border.Background>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                            <GradientStop Color="#0E1A2A" Offset="0"/>
+                            <GradientStop Color="#080E18" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Border.Background>
+                    <Viewbox Stretch="Uniform" Margin="6">
+                        <Canvas Width="64" Height="64">
+                            <Path Stroke="#00D4FF" StrokeThickness="2.4" StrokeLineJoin="Round"
+                                  Fill="#061018" Opacity="0.95"
+                                  Data="M32,6 L53,18 L53,46 L32,58 L11,46 L11,18 Z"/>
+                            <Path Stroke="#00D4FF" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Opacity="0.9"
+                                  Data="M32,22 L32,42 M22,32 L42,32 M26,26 L38,38 M38,26 L26,38"/>
+                            <Ellipse Canvas.Left="28" Canvas.Top="28" Width="8" Height="8" Fill="#00D4FF"/>
+                        </Canvas>
+                    </Viewbox>
+                </Border>
+                <StackPanel VerticalAlignment="Center" Margin="12,0,0,0">
+                    <TextBlock Text="工管技术中心智造" FontSize="13" FontWeight="SemiBold" Foreground="#E8EAED"/>
+                    <TextBlock Text="工业设备实时监控系统" FontSize="11" Foreground="#7D8590" Margin="0,2,0,0"/>
+                    <TextBlock Text="INDUSTRIAL MONITOR" FontSize="9" FontWeight="Bold" Foreground="#4A5568"
+                               FontFamily="Consolas" Margin="0,3,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- 中央时间显示 -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                <Border Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="1" CornerRadius="4" Padding="16,6">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock x:Name="CurrentDateText" FontSize="11" Foreground="#5A6B7C" VerticalAlignment="Center" Margin="0,0,12,0"/>
+                        <TextBlock Text="|" Foreground="#1E2D3D" FontSize="11" Margin="0"/>
+                        <TextBlock x:Name="CurrentTimeText" FontSize="13" FontWeight="SemiBold" Foreground="#00D4FF" FontFamily="Consolas" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <!-- 窗口控制按钮 -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <Button Content="📑 日志查询" Height="32" VerticalAlignment="Center"
+                        Background="#0D1520" Foreground="#00D4FF" BorderBrush="#1E3D50"
+                        BorderThickness="1" Padding="14,4" Margin="0,0,12,0"
+                        Click="LogQuery_Click" FontSize="12"
+                        Cursor="Hand" ToolTip="打开日志查询页（操作日志 / 温度日志）">
+                    <Button.Resources>
+                        <Style TargetType="Border">
+                            <Setter Property="CornerRadius" Value="3"/>
+                        </Style>
+                    </Button.Resources>
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                CornerRadius="3" Padding="{TemplateBinding Padding}">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                                                <Setter TargetName="Bd" Property="BorderBrush" Value="#00D4FF"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+                <Button Content="⚙" Width="46" Height="36" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Settings_Click" FontSize="14"
+                        Cursor="Hand" BorderThickness="0" ToolTip="系统设置">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" Width="46" Height="36">
+                                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#1A2D3D"/>
+                                                <Setter Property="Foreground" Value="#00D4FF"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+                <Button Content="─" Width="46" Height="36" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Minimize_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button Content="□" Width="46" Height="36" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Maximize_Click" FontSize="10"
+                        Cursor="Hand" BorderThickness="0"/>
+                <Button Content="✕" Width="46" Height="36" Background="Transparent"
+                        Foreground="#5A6B7C" Click="Close_Click" FontSize="12"
+                        Cursor="Hand" BorderThickness="0">
+                    <Button.Style>
+                        <Style TargetType="Button">
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="Bd" Background="Transparent" Width="46" Height="36">
+                                            <ContentPresenter x:Name="CP" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Bd" Property="Background" Value="#FF4444"/>
+                                                <Setter TargetName="CP" Property="TextElement.Foreground" Value="White"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </Button.Style>
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 主内容区 -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <Grid Margin="24">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- 掉线设备警告条 -->
+                <Border Grid.Row="0" Background="#0D1520" BorderBrush="#FF4444" BorderThickness="1" CornerRadius="4" Padding="18,12"
+                        Visibility="{Binding DeviceManager.HasOfflineDevices, Converter={StaticResource BooleanToVisibilityConverter}}"
+                        Margin="0,0,0,16">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0" Orientation="Horizontal">
+                            <Ellipse Width="10" Height="10" Fill="#FF4444" Margin="0,0,12,0">
+                                <Ellipse.Triggers>
+                                    <EventTrigger RoutedEvent="Ellipse.Loaded">
+                                        <BeginStoryboard Storyboard="{StaticResource BreathAnimation}"/>
+                                    </EventTrigger>
+                                </Ellipse.Triggers>
+                            </Ellipse>
+                            <TextBlock Text="设备离线警告" FontSize="13" FontWeight="SemiBold" Foreground="#FF6B6B" VerticalAlignment="Center"/>
+                        </StackPanel>
+
+                        <ItemsControl Grid.Column="1" ItemsSource="{Binding DeviceManager.OfflineDevices}" Margin="16,0">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="#0D1520" BorderBrush="#FF4444" BorderThickness="0,0,0,1" Padding="12,6" Margin="0,0,8,0">
+                                        <TextBlock FontSize="11" FontFamily="Consolas">
+                                            <Run Text="{Binding Name}" Foreground="#FFAAAA"/>
+                                            <Run Text=" [" Foreground="#5A4A4A"/>
+                                            <Run Text="{Binding IpAddress}" Foreground="#5A6B7C"/>
+                                            <Run Text="]" Foreground="#5A4A4A"/>
+                                        </TextBlock>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <TextBlock Grid.Column="2" FontSize="11" Foreground="#5A4A4A" VerticalAlignment="Center" FontFamily="Consolas">
+                            <Run Text="OFFLINE: "/>
+                            <Run Text="{Binding DeviceManager.OfflineDeviceCount, Mode=OneWay}" Foreground="#FF4444" FontWeight="SemiBold"/>
+                        </TextBlock>
+                    </Grid>
+                </Border>
+
+                <!-- 控制栏 -->
+                <Grid Grid.Row="1" Margin="0,0,0,20">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0" Orientation="Horizontal">
+                        <Border Width="4" Height="26" Background="{StaticResource TechGradient}" CornerRadius="2" Margin="0,0,12,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="设备列表" FontSize="20" FontWeight="SemiBold" Foreground="#E0E0E0" VerticalAlignment="Center"/>
+                        <Border Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="1" CornerRadius="4" Padding="12,5" Margin="16,0,0,0">
+                            <TextBlock FontSize="12" FontFamily="Consolas">
+                                <Run Text="TOTAL: " Foreground="#4A5568"/>
+                                <Run Text="{Binding Devices.Count, Mode=OneWay}" Foreground="#00D4FF" FontWeight="SemiBold"/>
+                                <Run Text=" UNITS" Foreground="#4A5568"/>
+                            </TextBlock>
+                        </Border>
+                        <Border Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="1" CornerRadius="4" Padding="12,5" Margin="8,0,0,0">
+                            <TextBlock FontSize="12" FontFamily="Consolas">
+                                <Run Text="ONLINE: " Foreground="#4A5568"/>
+                                <Run Text="{Binding OnlineCount, Mode=OneWay}" Foreground="#00FF88" FontWeight="SemiBold"/>
+                            </TextBlock>
+                        </Border>
+                    </StackPanel>
+
+                    <Button Grid.Column="1" Content="⚡ 连接全部设备" Command="{Binding ConnectAllDevicesCommand}"
+                            Style="{StaticResource TechButtonStyle}" FontSize="13">
+                        <Button.Effect>
+                            <DropShadowEffect Color="#00D4FF" Opacity="0.3" BlurRadius="12" ShadowDepth="0"/>
+                        </Button.Effect>
+                    </Button>
+                </Grid>
+
+                <!-- 设备卡片网格 -->
+                <ItemsControl Grid.Row="2" ItemsSource="{Binding Devices}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Columns="3" Rows="2"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <controls:DeviceCard 
+                                DeviceName="{Binding Name}"
+                                Location="{Binding Location}"
+                                IsOnline="{Binding IsOnline}"
+                                StatusDisplay="{Binding StatusDisplay}"
+                                TemperatureDisplay="{Binding TemperatureDisplay}"
+                                TodayOperationCount="{Binding TodayOperationCount}"
+                                IpAddress="{Binding IpAddress}"
+                                LastUpdateTime="{Binding LastUpdateTime}"
+                                HasAlert="{Binding HasAlert}"
+                                ConnectCommand="{Binding DataContext.ConnectDeviceCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                DisconnectCommand="{Binding DataContext.DisconnectDeviceCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                DetailCommand="{Binding DataContext.OpenDeviceDetailCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                DataContext="{Binding}"
+                                Margin="0,0,12,12" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Window>

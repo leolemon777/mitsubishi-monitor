@@ -1,0 +1,101 @@
+<UserControl x:Class="MitsubishiMonitor.Demo.Controls.OperationLogViewer"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             mc:Ignorable="d" 
+             d:DesignHeight="400" d:DesignWidth="800">
+    
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- 筛选工具栏 -->
+        <Border Grid.Row="0" Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="0,0,0,1" Padding="12,8">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="类型：" FontSize="12" Foreground="#7D8590" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="TypeFilter" Width="75" Margin="0,0,12,0"
+                          Background="#161B22" Foreground="#C9D1D9" BorderBrush="#30363D"
+                          SelectedIndex="0" SelectionChanged="TypeFilter_SelectionChanged">
+                    <ComboBoxItem Content="全部"/>
+                    <ComboBoxItem Content="X"/>
+                    <ComboBoxItem Content="Y"/>
+                    <ComboBoxItem Content="M"/>
+                    <ComboBoxItem Content="TEMP"/>
+                </ComboBox>
+                <TextBlock Text="搜索：" FontSize="12" Foreground="#7D8590" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox x:Name="SearchBox" Width="200" Padding="6,4"
+                         Background="#161B22" Foreground="#C9D1D9" BorderBrush="#30363D"
+                         Text="{Binding SearchText, RelativeSource={RelativeSource AncestorType=UserControl}, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button Content="✕" Margin="6,0,0,0" Padding="8,4"
+                        Background="#161B22" Foreground="#7D8590" BorderBrush="#30363D" BorderThickness="1"
+                        Cursor="Hand" Click="ClearSearch_Click" FontSize="11"/>
+            </StackPanel>
+        </Border>
+
+        <!-- 日志列表 -->
+        <Border Grid.Row="1" Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="0,0,0,1" Padding="0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl x:Name="LogList">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <VirtualizingStackPanel/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border BorderBrush="#21262D" BorderThickness="0,0,0,1" Padding="14,8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="85"/>
+                                        <ColumnDefinition Width="45"/>
+                                        <ColumnDefinition Width="65"/>
+                                        <ColumnDefinition Width="65"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="{Binding TimeDisplay}" FontFamily="Consolas" FontSize="12" Foreground="#7D8590" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding LogType}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Foreground" Value="#3FB950"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding LogType}" Value="X">
+                                                        <Setter Property="Foreground" Value="#58A6FF"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding LogType}" Value="Y">
+                                                        <Setter Property="Foreground" Value="#3FB950"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding LogType}" Value="M">
+                                                        <Setter Property="Foreground" Value="#A371F7"/>
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding LogType}" Value="TEMP">
+                                                        <Setter Property="Foreground" Value="#F0883E"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                    <TextBlock Grid.Column="2" Text="{Binding PointAddress}" FontSize="12" Foreground="#D29922" FontFamily="Consolas" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding Action}" FontSize="12" Foreground="#7D8590" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding Description}" FontSize="12" Foreground="#C9D1D9" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <!-- 底部状态栏 -->
+        <Border Grid.Row="2" Background="#161B22" Padding="14,6">
+            <TextBlock FontSize="11" Foreground="#484F58">
+                <Run Text="共 "/>
+                <Run Text="{Binding Logs.Count, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                <Run Text=" 条记录"/>
+            </TextBlock>
+        </Border>
+    </Grid>
+</UserControl>
