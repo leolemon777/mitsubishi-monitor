@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Text;
 using System.Threading.Tasks;
 using OfficeOpenXml;
 using MitsubishiMonitor.Demo.Models;
@@ -321,6 +324,34 @@ namespace MitsubishiMonitor.Demo.Services
             return filePath;
         }
 
+        /// <summary>
+        /// 导出工控机可直接查看的数据包：HTML 查看页 + CSV 明细 + Excel 备份。
+        /// HTML 可用系统自带浏览器打开，CSV 可用记事本打开。
+        /// </summary>
+        public async Task<string> ExportDeviceReadablePackageAsync(Device device, List<TemperatureLog> tempLogs, List<OperationLog> opLogs)
+        {
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var directory = GetExportPackageDirectory($"{device.Name}_{timestamp}");
+
+            await ExportDeviceDataAsync(device, tempLogs, opLogs, Path.Combine(directory, "Excel备份.xlsx"));
+
+            var tempCsvPath = Path.Combine(directory, "温度记录.csv");
+            var opCsvPath = Path.Combine(directory, "操作日志.csv");
+            var htmlPath = Path.Combine(directory, "日志查看.html");
+
+            await WriteUtf8BomAsync(tempCsvPath, BuildTemperatureCsv(tempLogs, device.Name));
+            await WriteUtf8BomAsync(opCsvPath, BuildOperationCsv(opLogs, device.Name));
+            await WriteUtf8BomAsync(htmlPath, BuildReadableHtml(
+                device.Name,
+                DateTime.MinValue,
+                DateTime.MinValue,
+                tempLogs,
+                opLogs,
+                device));
+
+            return htmlPath;
+        }
+
         private string GetDefaultFilePath(string dataType, string timestamp)
         {
             var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
@@ -442,6 +473,44 @@ namespace MitsubishiMonitor.Demo.Services
             return filePath;
         }
 
+        /// <summary>
+        /// 日志查询页导出工控机可读包：HTML 查看页 + CSV 明细 + Excel 备份。
+        /// </summary>
+        public async Task<string> ExportLogsReadablePackageAsync(
+            string deviceLabel,
+            DateTime startTime,
+            DateTime endTime,
+            List<TemperatureLog> tempLogs,
+            List<OperationLog> opLogs)
+        {
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var safeDeviceLabel = SanitizeFileName(deviceLabel);
+            var directory = GetExportPackageDirectory($"日志_{safeDeviceLabel}_{timestamp}");
+
+            await ExportLogsAsync(
+                deviceLabel,
+                startTime,
+                endTime,
+                tempLogs,
+                opLogs,
+                Path.Combine(directory, "Excel备份.xlsx"));
+
+            var tempCsvPath = Path.Combine(directory, "温度记录.csv");
+            var opCsvPath = Path.Combine(directory, "操作日志.csv");
+            var htmlPath = Path.Combine(directory, "日志查看.html");
+
+            await WriteUtf8BomAsync(tempCsvPath, BuildTemperatureCsv(tempLogs, ""));
+            await WriteUtf8BomAsync(opCsvPath, BuildOperationCsv(opLogs, ""));
+            await WriteUtf8BomAsync(htmlPath, BuildReadableHtml(
+                deviceLabel,
+                startTime,
+                endTime,
+                tempLogs,
+                opLogs));
+
+            return htmlPath;
+        }
+
         private static string SanitizeFileName(string raw)
         {
             if (string.IsNullOrEmpty(raw)) return "未命名";
@@ -450,6 +519,163 @@ namespace MitsubishiMonitor.Demo.Services
             foreach (var c in raw)
                 sb.Append(invalid.Contains(c) ? '_' : c);
             return sb.ToString();
+        }
+
+        private string GetExportPackageDirectory(string name)
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            var directory = Path.Combine(desktop, "监控数据导出", SanitizeFileName(name));
+            Directory.CreateDirectory(directory);
+            return directory;
+        }
+
+        private static async Task WriteUtf8BomAsync(string path, string content)
+        {
+            await File.WriteAllTextAsync(path, content, new UTF8Encoding(true));
+        }
+
+        private static string BuildTemperatureCsv(List<TemperatureLog> logs, string fallbackDeviceName)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("序号,设备名,温度(℃),热电偶A(V),热电偶B(V),热电偶C(V),是否异常,记录时间");
+            for (int i = 0; i < logs.Count; i++)
+            {
+                var log = logs[i];
+                var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
+                sb.AppendLine(string.Join(",",
+                    Csv(i + 1),
+                    Csv(deviceName),
+                    Csv(log.Temperature.ToString("F1", CultureInfo.InvariantCulture)),
+                    Csv(log.ThermocoupleA.ToString("F3", CultureInfo.InvariantCulture)),
+                    Csv(log.ThermocoupleB.ToString("F3", CultureInfo.InvariantCulture)),
+                    Csv(log.ThermocoupleC.ToString("F3", CultureInfo.InvariantCulture)),
+                    Csv(log.IsAbnormal ? "是" : "否"),
+                    Csv(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))));
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildOperationCsv(List<OperationLog> logs, string fallbackDeviceName)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("序号,时间,设备名,类型,地址,中文点位,动作,描述,操作员");
+            for (int i = 0; i < logs.Count; i++)
+            {
+                var log = logs[i];
+                var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
+                sb.AppendLine(string.Join(",",
+                    Csv(i + 1),
+                    Csv(log.LogTime.ToString("yyyy-MM-dd HH:mm:ss")),
+                    Csv(deviceName),
+                    Csv(log.LogType),
+                    Csv(log.PointAddress),
+                    Csv(log.PointLabel),
+                    Csv(log.Action),
+                    Csv(log.Description),
+                    Csv(log.Operator)));
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildReadableHtml(
+            string title,
+            DateTime startTime,
+            DateTime endTime,
+            List<TemperatureLog> tempLogs,
+            List<OperationLog> opLogs,
+            Device device = null)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("<!doctype html>");
+            sb.AppendLine("<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">");
+            sb.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+            sb.AppendLine($"<title>{Html(title)} 日志查看</title>");
+            sb.AppendLine("<style>");
+            sb.AppendLine("body{font-family:'Microsoft YaHei UI','Microsoft YaHei',Arial,sans-serif;margin:24px;background:#f3f5f7;color:#1f2933}");
+            sb.AppendLine("h1{font-size:24px;margin:0 0 8px} h2{font-size:18px;margin:28px 0 10px}");
+            sb.AppendLine(".meta{background:#fff;border:1px solid #d7dde5;padding:14px 16px;margin:16px 0 18px}");
+            sb.AppendLine(".meta div{line-height:1.8}.file{color:#475569;font-size:13px}");
+            sb.AppendLine("table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:22px;font-size:13px}");
+            sb.AppendLine("th,td{border:1px solid #d7dde5;padding:7px 8px;text-align:left;vertical-align:top}");
+            sb.AppendLine("th{background:#e9eef5;color:#111827;position:sticky;top:0}.bad{color:#b91c1c;font-weight:700}");
+            sb.AppendLine(".empty{padding:18px;background:#fff;border:1px solid #d7dde5;color:#64748b}");
+            sb.AppendLine("</style></head><body>");
+            sb.AppendLine($"<h1>{Html(title)} 日志查看</h1>");
+            sb.AppendLine("<div class=\"file\">此文件可在未安装 Excel/WPS/数据库工具的工控机上直接查看。</div>");
+            sb.AppendLine("<div class=\"meta\">");
+            if (device != null)
+            {
+                sb.AppendLine($"<div><b>设备名称：</b>{Html(device.Name)}</div>");
+                sb.AppendLine($"<div><b>设备位置：</b>{Html(device.Location)}</div>");
+                sb.AppendLine($"<div><b>IP 地址：</b>{Html(device.IpAddress)}</div>");
+            }
+            else
+            {
+                sb.AppendLine($"<div><b>设备范围：</b>{Html(title)}</div>");
+                sb.AppendLine($"<div><b>查询时间：</b>{Html(startTime.ToString("yyyy-MM-dd HH:mm:ss"))} ~ {Html(endTime.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
+            }
+            sb.AppendLine($"<div><b>导出时间：</b>{Html(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
+            sb.AppendLine($"<div><b>温度记录：</b>{tempLogs.Count} 条</div>");
+            sb.AppendLine($"<div><b>操作日志：</b>{opLogs.Count} 条</div>");
+            sb.AppendLine("</div>");
+
+            sb.AppendLine("<h2>操作日志</h2>");
+            if (opLogs.Count == 0)
+            {
+                sb.AppendLine("<div class=\"empty\">暂无操作日志。</div>");
+            }
+            else
+            {
+                sb.AppendLine("<table><thead><tr><th>序号</th><th>时间</th><th>设备名</th><th>类型</th><th>地址</th><th>中文点位</th><th>动作</th><th>描述</th><th>操作员</th></tr></thead><tbody>");
+                for (int i = 0; i < opLogs.Count; i++)
+                {
+                    var log = opLogs[i];
+                    var deviceName = string.IsNullOrEmpty(log.DeviceName) ? device?.Name ?? "" : log.DeviceName;
+                    sb.AppendLine("<tr>" +
+                        $"<td>{i + 1}</td><td>{Html(log.LogTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td>" +
+                        $"<td>{Html(deviceName)}</td><td>{Html(log.LogType)}</td><td>{Html(log.PointAddress)}</td>" +
+                        $"<td>{Html(log.PointLabel)}</td><td>{Html(log.Action)}</td><td>{Html(log.Description)}</td><td>{Html(log.Operator)}</td>" +
+                        "</tr>");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+
+            sb.AppendLine("<h2>温度记录</h2>");
+            if (tempLogs.Count == 0)
+            {
+                sb.AppendLine("<div class=\"empty\">暂无温度记录。</div>");
+            }
+            else
+            {
+                sb.AppendLine("<table><thead><tr><th>序号</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>记录时间</th></tr></thead><tbody>");
+                for (int i = 0; i < tempLogs.Count; i++)
+                {
+                    var log = tempLogs[i];
+                    var deviceName = string.IsNullOrEmpty(log.DeviceName) ? device?.Name ?? "" : log.DeviceName;
+                    var abnormalClass = log.IsAbnormal ? " class=\"bad\"" : "";
+                    sb.AppendLine("<tr>" +
+                        $"<td>{i + 1}</td><td>{Html(deviceName)}</td><td{abnormalClass}>{Html(log.Temperature.ToString("F1", CultureInfo.InvariantCulture))}</td>" +
+                        $"<td>{Html(log.ThermocoupleA.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.ThermocoupleB.ToString("F3", CultureInfo.InvariantCulture))}</td>" +
+                        $"<td>{Html(log.ThermocoupleC.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.IsAbnormal ? "是" : "否")}</td>" +
+                        $"<td>{Html(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td>" +
+                        "</tr>");
+                }
+                sb.AppendLine("</tbody></table>");
+            }
+
+            sb.AppendLine("</body></html>");
+            return sb.ToString();
+        }
+
+        private static string Csv(object value)
+        {
+            var text = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+            return "\"" + text.Replace("\"", "\"\"") + "\"";
+        }
+
+        private static string Html(string value)
+        {
+            return WebUtility.HtmlEncode(value ?? "");
         }
     }
 }

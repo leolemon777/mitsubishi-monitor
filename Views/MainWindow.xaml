@@ -394,7 +394,7 @@
                         <Border Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="1" CornerRadius="4" Padding="12,5" Margin="16,0,0,0">
                             <TextBlock FontSize="12" FontFamily="Consolas">
                                 <Run Text="TOTAL: " Foreground="#4A5568"/>
-                                <Run Text="{Binding Devices.Count, Mode=OneWay}" Foreground="#00D4FF" FontWeight="SemiBold"/>
+                                <Run Text="{Binding TotalCount, Mode=OneWay}" Foreground="#00D4FF" FontWeight="SemiBold"/>
                                 <Run Text=" UNITS" Foreground="#4A5568"/>
                             </TextBlock>
                         </Border>
@@ -404,14 +404,61 @@
                                 <Run Text="{Binding OnlineCount, Mode=OneWay}" Foreground="#00FF88" FontWeight="SemiBold"/>
                             </TextBlock>
                         </Border>
+                        <Border Background="#0D1520" BorderBrush="#1E2D3D" BorderThickness="1" CornerRadius="4" Padding="12,5" Margin="8,0,0,0">
+                            <TextBlock Text="{Binding ConnectionStatusText, Mode=OneWay}"
+                                       FontSize="12" Foreground="#B0BAC4" FontFamily="Microsoft YaHei UI"/>
+                        </Border>
                     </StackPanel>
 
-                    <Button Grid.Column="1" Content="⚡ 连接全部设备" Command="{Binding ConnectAllDevicesCommand}"
-                            Style="{StaticResource TechButtonStyle}" FontSize="13">
-                        <Button.Effect>
-                            <DropShadowEffect Color="#00D4FF" Opacity="0.3" BlurRadius="12" ShadowDepth="0"/>
-                        </Button.Effect>
-                    </Button>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+
+                        <!-- 三色灯复位按钮：常驻显示，报警时用于消音，非报警时只关闭蜂鸣器 -->
+                        <Button x:Name="AcknowledgeAlarmButton"
+                                Command="{Binding AcknowledgeAlarmCommand}"
+                                Padding="16,8" Margin="0,0,12,0"
+                                Cursor="Hand" FontSize="13"
+                                Background="#0D1520" Foreground="#FFB86B" BorderBrush="#1E3D50"
+                                ToolTip="关闭三色灯蜂鸣器；报警中会保持红/黄灯，温度恢复后自动复位">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" CornerRadius="4" Padding="{TemplateBinding Padding}"
+                                            BorderThickness="1" BorderBrush="{TemplateBinding BorderBrush}"
+                                            Background="{TemplateBinding Background}">
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                            <TextBlock Text="🔕" FontSize="14" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                            <TextBlock x:Name="AlarmResetText" Text="三色灯复位" FontSize="13" FontWeight="SemiBold"
+                                                       Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding DeviceManager.HasActiveAlarm}" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="#2A0A0A"/>
+                                            <Setter TargetName="Bd" Property="BorderBrush" Value="#FF4444"/>
+                                            <Setter TargetName="AlarmResetText" Property="Foreground" Value="#FF6B6B"/>
+                                            <Setter TargetName="Bd" Property="Effect">
+                                                <Setter.Value>
+                                                    <DropShadowEffect Color="#FF4444" Opacity="0.5" BlurRadius="12" ShadowDepth="0"/>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </DataTrigger>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="BorderBrush" Value="#FFB86B"/>
+                                        </Trigger>
+                                        <Trigger Property="IsPressed" Value="True">
+                                            <Setter TargetName="Bd" Property="Opacity" Value="0.7"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+
+                        <Button Content="⚡ 连接全部设备" Command="{Binding ConnectAllDevicesCommand}"
+                                Style="{StaticResource TechButtonStyle}" FontSize="13">
+                            <Button.Effect>
+                                <DropShadowEffect Color="#00D4FF" Opacity="0.3" BlurRadius="12" ShadowDepth="0"/>
+                            </Button.Effect>
+                        </Button>
+                    </StackPanel>
                 </Grid>
 
                 <!-- 设备卡片网格 -->

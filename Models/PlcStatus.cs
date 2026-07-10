@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using System.Linq;
 
 namespace MitsubishiMonitor.Demo.Models
 {
@@ -20,6 +21,7 @@ namespace MitsubishiMonitor.Demo.Models
         private float _thermocoupleC;
         private bool _isConnected;
         private DateTime _lastUpdateTime;
+        private DateTime _lastTemperatureSampleTime;
         private bool _isAlarm;
         private bool _isSsrFault;
         private Dictionary<string, int> _cValues = new();
@@ -49,6 +51,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _x;
             set
             {
+                // 内容未变则跳过所有通知，避免每秒向 Dispatcher 队列灌入无用消息
+                if (value != null && _x != null && value.Length == _x.Length && value.SequenceEqual(_x))
+                    return;
                 _x = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(X0));
@@ -84,6 +89,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _y;
             set
             {
+                // 内容未变则跳过所有通知
+                if (value != null && _y != null && value.Length == _y.Length && value.SequenceEqual(_y))
+                    return;
                 _y = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(Y0));
@@ -125,6 +133,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _m;
             set
             {
+                // 内容未变则跳过所有通知
+                if (value != null && _m != null && value.Length == _m.Length && value.SequenceEqual(_m))
+                    return;
                 _m = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(M2009_AddWater));
@@ -265,6 +276,20 @@ namespace MitsubishiMonitor.Demo.Models
             set
             {
                 _lastUpdateTime = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// 最后一次成功完成温度采样的时间。
+        /// LastUpdateTime 会被 X/Y/M 轮询刷新，不能用来判断温度是否仍在更新。
+        /// </summary>
+        public DateTime LastTemperatureSampleTime
+        {
+            get => _lastTemperatureSampleTime;
+            set
+            {
+                _lastTemperatureSampleTime = value;
                 OnPropertyChanged();
             }
         }

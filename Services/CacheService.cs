@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Timers;
 using MitsubishiMonitor.Demo.Models;
 
 namespace MitsubishiMonitor.Demo.Services
@@ -18,7 +19,23 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly ConcurrentDictionary<string, CacheEntry> _cache = new();
         private readonly TimeSpan _defaultExpiration = TimeSpan.FromMinutes(5);
 
-        private CacheService() { }
+        /// <summary>
+        /// 缓存最大条目数，防止无上限增长（超出后不再写入新缓存）
+        /// </summary>
+        private const int MaxEntries = 200;
+
+        /// <summary>
+        /// 定时清理：每 10 分钟清除过期条目，防止长时间运行内存泄漏
+        /// </summary>
+        private readonly Timer _cleanupTimer;
+
+        private CacheService()
+        {
+            _cleanupTimer = new Timer(TimeSpan.FromMinutes(10).TotalMilliseconds);
+            _cleanupTimer.Elapsed += (_, _) => CleanupExpired();
+            _cleanupTimer.AutoReset = true;
+            _cleanupTimer.Start();
+        }
 
         /// <summary>
         /// 获取缓存
@@ -42,6 +59,17 @@ namespace MitsubishiMonitor.Demo.Services
         /// </summary>
         public void Set<T>(string key, T value, TimeSpan? expiration = null) where T : class
         {
+            // 超过最大条目数时先清理过期条目，若仍超限则跳过写入
+            if (_cache.Count >= MaxEntries)
+            {
+                CleanupExpired();
+                if (_cache.Count >= MaxEntries)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[Cache] 条目已满({MaxEntries})，跳过写入 key={key}");
+                    return;
+                }
+            }
+
             var entry = new CacheEntry
             {
                 Value = value,

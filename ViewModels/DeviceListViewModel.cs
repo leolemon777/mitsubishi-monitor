@@ -19,6 +19,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private bool _disposed;
         private readonly DeviceManagerService _deviceManager;
         private readonly Timer _timer;
+        private int _autoConnectStarted;
+        private int _connectAllRunning;
 
         [ObservableProperty]
         private ObservableCollection<Device> _devices = new();
@@ -29,10 +31,18 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [ObservableProperty]
         private string _currentDate;
 
+        [ObservableProperty]
+        private string _connectionStatusText = "启动中";
+
         /// <summary>
         /// 在线设备数量
         /// </summary>
-        public int OnlineCount => Devices.Count(d => d.IsOnline);
+        public int OnlineCount => Devices.Count(d => d.IsOnline && !d.IsPlaceholder);
+
+        /// <summary>
+        /// 真实设备数量（不含占位符）
+        /// </summary>
+        public int TotalCount => Devices.Count(d => !d.IsPlaceholder);
 
         /// <summary>
         /// 获取设备管理服务（供详情页使用）
@@ -50,25 +60,29 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 Devices.Add(device);
             }
 
+            // 增加两个占位卡片
+            Devices.Add(new Device { Id = 998, Name = "后续拓展", Location = "预留位", IsPlaceholder = true });
+            Devices.Add(new Device { Id = 999, Name = "后续拓展", Location = "预留位", IsPlaceholder = true });
+
             // 订阅设备状态变化事件
             _deviceManager.DeviceStatusChanged += OnDeviceStatusChanged;
 
-            // 启动时钟 - 改为5秒更新一次，减少UI压力
+            // 时钟显示完全由 MainWindow 的 DispatcherTimer 负责（直接操作 TextBlock，1s 精度）
+            // OnlineCount 已通过 DeviceStatusChanged 事件实时更新，30s 轮询只是保底兜底
             UpdateTime();
-            _timer = new Timer(5000);
+            _timer = new Timer(30_000);
             _timer.Elapsed += (s, e) =>
             {
-                // 必须在UI线程上更新属性，否则可能导致UI冻结
                 App.Current.Dispatcher.BeginInvoke(() =>
                 {
-                    UpdateTime();
+                    // 30s 保底刷新 OnlineCount（正常情况事件驱动已覆盖）
                     OnPropertyChanged(nameof(OnlineCount));
                 });
             };
             _timer.AutoReset = true;
             _timer.Start();
 
-            // 不再自动连接设备，由用户手动点击连接按钮
+            SetConnectionStatus("主界面初始化完成，等待连接 PLC...");
         }
 
         private void OnDeviceStatusChanged(object sender, DeviceStatusChangeEventArgs e)
@@ -89,6 +103,119 @@ namespace MitsubishiMonitor.Demo.ViewModels
             OnPropertyChanged(nameof(CurrentTime));
         }
 
+        private void SetConnectionStatus(string text)
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                ConnectionStatusText = text;
+                return;
+            }
+
+            dispatcher.BeginInvoke(new Action(() => ConnectionStatusText = text));
+        }
+
+        public void StartAutoConnectAfterUiReady()
+        {
+            if (_disposed) return;
+            if (System.Threading.Interlocked.Exchange(ref _autoConnectStarted, 1) == 1) return;
+
+            SetConnectionStatus("界面已显示，5 秒后自动连接 PLC...");
+            Views.MainWindow.DbgLog("DeviceListVM:AutoConnect", "主界面加载完成，延迟启动自动连接", new
+            {
+                delayMs = 5000,
+                total = TotalCount
+            }, "CONNECT");
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(5000);
+                    if (_disposed) return;
+                    await RunConnectAllAsync("AutoConnect", false);
+                }
+                catch (Exception ex)
+                {
+                    SetConnectionStatus($"自动连接异常：{ex.Message}");
+                    Views.MainWindow.DbgLog("DeviceListVM:AutoConnect", "自动连接任务异常", new
+                    {
+                        error = ex.Message,
+                        stack = ex.StackTrace
+                    }, "CONNECT");
+                }
+            });
+        }
+
+        private async Task<bool> RunConnectAllAsync(string source, bool showSuccessDialog)
+        {
+            if (_disposed) return false;
+            if (System.Threading.Interlocked.Exchange(ref _connectAllRunning, 1) == 1)
+            {
+                SetConnectionStatus("已有连接任务正在执行，请稍等...");
+                Views.MainWindow.DbgLog("DeviceListVM:ConnectAll", "跳过重复连接任务", new
+                {
+                    source
+                }, "CONNECT");
+                return false;
+            }
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                SetConnectionStatus(source == "AutoConnect" ? "正在后台逐台连接 PLC..." : "正在连接全部 PLC...");
+                Views.MainWindow.DbgLog("DeviceListVM:ConnectAll", "连接任务开始", new
+                {
+                    source,
+                    total = TotalCount
+                }, "CONNECT");
+
+                var (successCount, failedReasons) = await _deviceManager.ConnectAllDevicesAsync();
+                int total = TotalCount;
+                int failCount = total - successCount;
+
+                SetConnectionStatus($"连接完成：{successCount}/{total} 台在线");
+                Views.MainWindow.DbgLog("DeviceListVM:ConnectAll", "连接任务结束", new
+                {
+                    source,
+                    elapsedMs = sw.ElapsedMilliseconds,
+                    successCount,
+                    failCount,
+                    total,
+                    failedReasons = failedReasons.ToArray()
+                }, "CONNECT");
+
+                if (showSuccessDialog && failCount == 0)
+                {
+                    MessageBox.Show($"已连接全部 {successCount} 台设备。", "连接成功", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SetConnectionStatus($"连接异常：{ex.Message}");
+                Views.MainWindow.DbgLog("DeviceListVM:ConnectAll", "连接任务异常", new
+                {
+                    source,
+                    elapsedMs = sw.ElapsedMilliseconds,
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                }, "CONNECT");
+
+                if (showSuccessDialog)
+                {
+                    MessageBox.Show($"连接设备失败:\n{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+
+                return false;
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _connectAllRunning, 0);
+            }
+        }
+
         /// <summary>
         /// 刷新所有设备状态
         /// </summary>
@@ -106,6 +233,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     {
                         Devices.Add(device);
                     }
+                    Devices.Add(new Device { Id = 998, Name = "后续拓展", Location = "预留位", IsPlaceholder = true });
+                    Devices.Add(new Device { Id = 999, Name = "后续拓展", Location = "预留位", IsPlaceholder = true });
                 });
             }
             catch (Exception ex)
@@ -120,22 +249,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [RelayCommand]
         private async Task ConnectAllDevicesAsync()
         {
-            try
-            {
-                var (successCount, failedReasons) = await _deviceManager.ConnectAllDevicesAsync();
-                int total = Devices.Count;
-                int failCount = total - successCount;
-
-                // 连接结果仅在全部成功时提示，失败的设备静默跳过
-                if (failCount == 0)
-                {
-                    MessageBox.Show($"已连接全部 {successCount} 台设备。", "连接成功", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"连接设备失败:\n{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
+            await RunConnectAllAsync("ManualButton", true);
         }
 
         /// <summary>
@@ -146,9 +260,12 @@ namespace MitsubishiMonitor.Demo.ViewModels
         {
             try
             {
-                if (device == null)
+                if (device == null || device.IsPlaceholder)
                 {
-                    MessageBox.Show("设备信息为空", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    if (device == null)
+                    {
+                        MessageBox.Show("设备信息为空", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                     return;
                 }
 
@@ -178,9 +295,11 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
             try
             {
+                SetConnectionStatus($"正在连接 {device.Name}...");
                 var success = await _deviceManager.ConnectDeviceAsync(device.Id);
                 if (success)
                 {
+                    SetConnectionStatus($"{device.Name} 已连接");
                     System.Diagnostics.Debug.WriteLine($"[连接] {device.Name} 连接成功");
                 }
                 else
@@ -188,11 +307,13 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     var error = _deviceManager.GetPlcService(device.Id) is MitsubishiPlcService plc
                         ? plc.LastConnectionError
                         : "未知错误";
+                    SetConnectionStatus($"{device.Name} 连接失败");
                     MessageBox.Show($"连接 {device.Name} 失败:\n{error}", "连接失败", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
             }
             catch (Exception ex)
             {
+                SetConnectionStatus($"连接异常：{ex.Message}");
                 MessageBox.Show($"连接设备异常:\n{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -208,11 +329,30 @@ namespace MitsubishiMonitor.Demo.ViewModels
             try
             {
                 _deviceManager.DisconnectDevice(device.Id);
+                SetConnectionStatus($"{device.Name} 已断开");
                 System.Diagnostics.Debug.WriteLine($"[断开] {device.Name} 已断开");
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"断开设备异常:\n{ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>
+        /// 消音/复位：关闭蜂鸣器，灯光保持（红/黄）直到温度下降恢复正常。
+        /// 仅在 HasActiveAlarm 为 true 时界面上该按钮可见。
+        /// </summary>
+        [RelayCommand]
+        private void AcknowledgeAlarm()
+        {
+            try
+            {
+                _deviceManager.AcknowledgeAlarm();
+                System.Diagnostics.Debug.WriteLine("[UI] 操作员点击消音/复位");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[UI] 消音/复位异常: {ex.Message}");
             }
         }
 

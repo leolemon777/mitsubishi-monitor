@@ -36,6 +36,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private readonly DeviceManagerService _deviceManager;
         private readonly ExcelExportService _excelService = new();
         private bool _disposed;
+        private const int MaxOperationRows = 5000;
+        private const int MaxTemperatureRows = 5000;
 
         /// <summary>
         /// 当前进行中的 LoadAsync 调度令牌：每次切设备/时间范围都换新 token，
@@ -234,14 +236,14 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     ? SelectedDevice.DisplayName
                     : "全部设备";
 
-                var path = await _excelService.ExportLogsAsync(
+                var path = await _excelService.ExportLogsReadablePackageAsync(
                     deviceLabel,
                     FilterStartDate, FilterEndDate,
                     TemperatureLogs.ToList(),
                     OperationLogs.ToList());
 
                 MessageBox.Show(
-                    $"导出成功！\n\n范围: {deviceLabel} / {FilterStartDate:yyyy-MM-dd HH:mm} ~ {FilterEndDate:yyyy-MM-dd HH:mm}\n操作日志: {OperationLogs.Count} 条\n温度日志: {TemperatureLogs.Count} 条\n\n文件位置:\n{path}",
+                    $"导出成功！\n\n范围: {deviceLabel} / {FilterStartDate:yyyy-MM-dd HH:mm} ~ {FilterEndDate:yyyy-MM-dd HH:mm}\n操作日志: {OperationLogs.Count} 条\n温度日志: {TemperatureLogs.Count} 条\n\n工控机可直接打开:\n{path}",
                     "导出成功", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
@@ -266,7 +268,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
             try
             {
                 IsLoading = true;
-                Application.Current?.Dispatcher.Invoke(UpdateStatusText);
+                await RunOnUiAsync(UpdateStatusText);
 
                 using var ds = new DataService();
                 await ds.InitializeAsync();
@@ -277,21 +279,25 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
                 if (SelectedDevice?.DeviceId is int devId)
                 {
-                    opList = await ds.GetOperationLogsByDeviceAsync(devId, FilterStartDate, FilterEndDate);
-                    tempList = await ds.GetTemperatureLogsByDeviceAsync(devId, FilterStartDate, FilterEndDate);
+                    opList = await ds.GetOperationLogsByDevicePagedAsync(devId, FilterStartDate, FilterEndDate, 0, MaxOperationRows);
+                    tempList = await ds.GetTemperatureLogsByDevicePagedAsync(devId, FilterStartDate, FilterEndDate, 0, MaxTemperatureRows);
                 }
                 else
                 {
                     // 全部设备：把每台设备查询并合并（不在 DataService 里多写一个方法以减少改动面）
                     opList = new List<OperationLog>();
                     tempList = new List<TemperatureLog>();
-                    foreach (var d in _deviceManager.Devices)
+                    var devices = _deviceManager.Devices.ToList();
+                    var opLimitPerDevice = Math.Max(1, MaxOperationRows / Math.Max(1, devices.Count));
+                    var tempLimitPerDevice = Math.Max(1, MaxTemperatureRows / Math.Max(1, devices.Count));
+
+                    foreach (var d in devices)
                     {
                         ct.ThrowIfCancellationRequested();
                         opList.AddRange(
-                            await ds.GetOperationLogsByDeviceAsync(d.Id, FilterStartDate, FilterEndDate));
+                            await ds.GetOperationLogsByDevicePagedAsync(d.Id, FilterStartDate, FilterEndDate, 0, opLimitPerDevice));
                         tempList.AddRange(
-                            await ds.GetTemperatureLogsByDeviceAsync(d.Id, FilterStartDate, FilterEndDate));
+                            await ds.GetTemperatureLogsByDevicePagedAsync(d.Id, FilterStartDate, FilterEndDate, 0, tempLimitPerDevice));
                     }
 
                     // 合并后按时间倒/正序排列
@@ -302,7 +308,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 ct.ThrowIfCancellationRequested();
 
                 // 写回 ObservableCollection 必须在 UI 线程
-                Application.Current?.Dispatcher.Invoke(() =>
+                await RunOnUiAsync(() =>
                 {
                     OperationLogs.Clear();
                     foreach (var o in opList) OperationLogs.Add(o);
@@ -329,7 +335,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
             {
                 loadFaulted = true;
                 System.Diagnostics.Debug.WriteLine($"[LogQuery] 查询失败: {ex.Message}");
-                Application.Current?.Dispatcher.Invoke(() =>
+                await RunOnUiAsync(() =>
                 {
                     StatusText = $"查询失败: {ex.Message}";
                     ShowOperationEmptyState = false;
@@ -338,13 +344,25 @@ namespace MitsubishiMonitor.Demo.ViewModels
             }
             finally
             {
-                Application.Current?.Dispatcher.Invoke(() =>
+                await RunOnUiAsync(() =>
                 {
                     IsLoading = false;
                     if (!appliedToUi && !loadFaulted)
                         UpdateStatusText();
                 });
             }
+        }
+
+        private static Task RunOnUiAsync(Action action)
+        {
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+            {
+                action();
+                return Task.CompletedTask;
+            }
+
+            return dispatcher.InvokeAsync(action).Task;
         }
 
         private void UpdateStatusText()
@@ -362,8 +380,11 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 return;
             }
 
+            // 命中单次加载上限时明确提示，否则用户会误以为看到的就是全部记录
+            var truncated = OperationLogs.Count >= MaxOperationRows || TemperatureLogs.Count >= MaxTemperatureRows;
             StatusText =
                 $"操作日志 {opShown}/{OperationLogs.Count} 条 · 温度日志 {tempShown}/{TemperatureLogs.Count} 条" +
+                (truncated ? $"（已达单次加载上限 {MaxOperationRows} 条，可缩小时间范围查看更早记录）" : "") +
                 (string.IsNullOrEmpty(SearchText) && SelectedLogType == "全部" ? "" : "（已筛选）");
 
             ShowOperationEmptyState = opShown == 0;

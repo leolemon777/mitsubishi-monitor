@@ -49,6 +49,14 @@ namespace MitsubishiMonitor.Demo.Models
         private float _currentTemperature;
 
         /// <summary>
+        /// 是否已经收到过一轮完整、可信的温度采样。
+        /// 不能用温度是否大于 0 判断，因为 0°C 和负温度同样是合法值。
+        /// </summary>
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(TemperatureDisplay))]
+        private bool _hasTemperatureSample;
+
+        /// <summary>
         /// 是否有异常（温度超过阈值）
         /// </summary>
         [ObservableProperty]
@@ -70,7 +78,7 @@ namespace MitsubishiMonitor.Demo.Models
         /// <summary>
         /// 温度显示文本
         /// </summary>
-        public string TemperatureDisplay => CurrentTemperature > 0 ? $"{CurrentTemperature:F1}°C" : "--.-°C";
+        public string TemperatureDisplay => HasTemperatureSample ? $"{CurrentTemperature:F1}°C" : "--.-°C";
 
         /// <summary>
         /// 状态显示文本
@@ -81,5 +89,10 @@ namespace MitsubishiMonitor.Demo.Models
         /// 状态颜色
         /// </summary>
         public string StatusColor => HasAlert ? "#F44336" : (IsOnline ? "#4CAF50" : "#757575");
+
+        /// <summary>
+        /// 是否是占位卡片（后续拓展）
+        /// </summary>
+        public bool IsPlaceholder { get; set; }
     }
 }

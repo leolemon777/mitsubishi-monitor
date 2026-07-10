@@ -446,7 +446,7 @@
                     <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center">
                         <Button Content="🔄 刷新" Style="{StaticResource PrimaryBtn}"
                                 Command="{Binding RefreshCommand}" Margin="0,0,6,0"/>
-                        <Button Content="📥 导出 Excel" Style="{StaticResource PrimaryBtn}"
+                        <Button Content="📥 导出日志" Style="{StaticResource PrimaryBtn}"
                                 Command="{Binding ExportCommand}"/>
                         <TextBlock VerticalAlignment="Center" Margin="14,0,0,0" FontSize="12"
                                    Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">

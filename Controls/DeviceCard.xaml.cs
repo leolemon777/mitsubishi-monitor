@@ -45,6 +45,8 @@ namespace MitsubishiMonitor.Demo.Controls
         /// </summary>
         private void UpdateCardChrome()
         {
+            bool isPlaceholder = DataContext is Models.Device { IsPlaceholder: true };
+
             const double scaleHover = 1.022;
             const double scalePress = 0.985;
             double s = 1.0;
@@ -54,27 +56,60 @@ namespace MitsubishiMonitor.Demo.Controls
 
             if (!_cardMouseOver)
             {
-                RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x2D, 0x3D));
-                CardShadow.Color = Colors.Black;
-                CardShadow.Opacity = 0.3;
-                CardShadow.BlurRadius = 10;
-                CardShadow.ShadowDepth = 2;
+                if (isPlaceholder)
+                {
+                    RootBorder.ClearValue(Border.BorderBrushProperty);
+                    CardShadow.Color = Colors.Black;
+                    CardShadow.Opacity = 0.15;
+                    CardShadow.BlurRadius = 6;
+                    CardShadow.ShadowDepth = 1;
+                }
+                else
+                {
+                    RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0x1E, 0x2D, 0x3D));
+                    CardShadow.Color = Colors.Black;
+                    CardShadow.Opacity = 0.3;
+                    CardShadow.BlurRadius = 10;
+                    CardShadow.ShadowDepth = 2;
+                }
             }
             else if (_cardPressed)
             {
-                RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 0xB4, 0xE6));
-                CardShadow.Color = Color.FromRgb(0, 0xD4, 0xFF);
-                CardShadow.Opacity = 0.28;
-                CardShadow.BlurRadius = 16;
-                CardShadow.ShadowDepth = 0;
+                if (isPlaceholder)
+                {
+                    RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x4A, 0x5A));
+                    CardShadow.Color = Color.FromRgb(0x3A, 0x4A, 0x5A);
+                    CardShadow.Opacity = 0.15;
+                    CardShadow.BlurRadius = 10;
+                    CardShadow.ShadowDepth = 0;
+                }
+                else
+                {
+                    RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 0xB4, 0xE6));
+                    CardShadow.Color = Color.FromRgb(0, 0xD4, 0xFF);
+                    CardShadow.Opacity = 0.28;
+                    CardShadow.BlurRadius = 16;
+                    CardShadow.ShadowDepth = 0;
+                }
             }
             else
             {
-                RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 0xD4, 0xFF));
-                CardShadow.Color = Color.FromRgb(0, 0xD4, 0xFF);
-                CardShadow.Opacity = 0.38;
-                CardShadow.BlurRadius = 22;
-                CardShadow.ShadowDepth = 0;
+                if (isPlaceholder)
+                {
+                    RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0x4A, 0x5A, 0x6A));
+                    CardShadow.Color = Color.FromRgb(0x4A, 0x5A, 0x6A);
+                    CardShadow.Opacity = 0.25;
+                    CardShadow.BlurRadius = 12;
+                    CardShadow.ShadowDepth = 0;
+                }
+                else
+                {
+                    RootBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(0, 0xD4, 0xFF));
+                    CardShadow.Color = Color.FromRgb(0, 0xD4, 0xFF);
+                    CardShadow.Opacity = 0.38;
+                    CardShadow.BlurRadius = 22;
+                    CardShadow.ShadowDepth = 0;
+                }
             }
         }
 
@@ -255,6 +290,8 @@ namespace MitsubishiMonitor.Demo.Controls
 
         private void OnCardClick(object sender, MouseButtonEventArgs e)
         {
+            if (DataContext is Models.Device device && device.IsPlaceholder) return;
+
             // 如果点击的是按钮,不触发详情命令
             if (e.OriginalSource is FrameworkElement element)
             {

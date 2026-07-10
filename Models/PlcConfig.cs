@@ -78,9 +78,9 @@ namespace MitsubishiMonitor.Demo.Models
         public int Port { get; set; } = 5000;
 
         /// <summary>
-        /// 连接超时时间(毫秒)，网络较慢或首次连接可适当调大
+        /// 连接超时时间(毫秒)。工控机启动时不能被离线 PLC 长时间拖住，默认控制在 3 秒。
         /// </summary>
-        public int ConnectTimeout { get; set; } = 8000;
+        public int ConnectTimeout { get; set; } = 3000;
 
         /// <summary>
         /// X点起始地址 (A系列1E帧: X0, X1...)
@@ -281,7 +281,7 @@ namespace MitsubishiMonitor.Demo.Models
         /// </summary>
         public string GetXAddress(int index)
         {
-            return index < 8 ? $"X{index}" : $"X{index + 2}";
+            return "X" + System.Convert.ToString(index, 8);
         }
 
         /// <summary>
@@ -298,7 +298,7 @@ namespace MitsubishiMonitor.Demo.Models
         /// </summary>
         public string GetYAddress(int index)
         {
-            return index < 8 ? $"Y{index}" : $"Y{index + 2}";
+            return "Y" + System.Convert.ToString(index, 8);
         }
 
         /// <summary>

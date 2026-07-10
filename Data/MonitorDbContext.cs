@@ -1,4 +1,5 @@
 using System;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using MitsubishiMonitor.Demo.Models;
 
@@ -26,7 +27,12 @@ namespace MitsubishiMonitor.Demo.Data
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            optionsBuilder.UseSqlite($"Data Source={_dbPath};Journal Mode=WAL;");
+            var connectionString = new SqliteConnectionStringBuilder
+            {
+                DataSource = _dbPath,
+                DefaultTimeout = 5,
+            }.ToString();
+            optionsBuilder.UseSqlite(connectionString);
         }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -43,6 +49,7 @@ namespace MitsubishiMonitor.Demo.Data
                 entity.Property(e => e.DeviceName).HasMaxLength(50);
                 entity.HasIndex(e => e.RecordTime);
                 entity.HasIndex(e => e.DeviceId);
+                entity.HasIndex(e => new { e.DeviceId, e.RecordTime });
             });
 
             // OperationLog配置
@@ -59,6 +66,7 @@ namespace MitsubishiMonitor.Demo.Data
                 entity.Property(e => e.LogTime).IsRequired();
                 entity.HasIndex(e => e.LogTime);
                 entity.HasIndex(e => e.DeviceId);
+                entity.HasIndex(e => new { e.DeviceId, e.LogTime });
             });
         }
 
@@ -77,13 +85,16 @@ namespace MitsubishiMonitor.Demo.Data
             TryAddColumn("OperationLog", "DeviceName", "TEXT");
             TryAddColumn("OperationLog", "PointLabel", "TEXT");
             TryAddColumn("TemperatureLog", "DeviceName", "TEXT");
+
+            TryCreateIndex("IX_OperationLog_DeviceId_LogTime", "OperationLog", "DeviceId, LogTime");
+            TryCreateIndex("IX_TemperatureLog_DeviceId_RecordTime", "TemperatureLog", "DeviceId, RecordTime");
         }
 
         private void TryAddColumn(string table, string column, string sqlType)
         {
             try
             {
-                using var conn = Database.GetDbConnection();
+                var conn = Database.GetDbConnection();
                 if (conn.State != System.Data.ConnectionState.Open)
                     conn.Open();
 
@@ -115,6 +126,25 @@ namespace MitsubishiMonitor.Demo.Data
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[DB升级] {table}.{column} 检查/添加失败: {ex.Message}");
+            }
+        }
+
+        private void TryCreateIndex(string indexName, string table, string columns)
+        {
+            try
+            {
+                var conn = Database.GetDbConnection();
+                if (conn.State != System.Data.ConnectionState.Open)
+                    conn.Open();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"CREATE INDEX IF NOT EXISTS {indexName} ON {table} ({columns});";
+                cmd.ExecuteNonQuery();
+                System.Diagnostics.Debug.WriteLine($"[DB升级] 确认索引 {indexName}");
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[DB升级] 索引 {indexName} 检查/创建失败: {ex.Message}");
             }
         }
     }

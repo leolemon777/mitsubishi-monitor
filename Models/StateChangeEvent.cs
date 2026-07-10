@@ -53,7 +53,7 @@ namespace MitsubishiMonitor.Demo.Models
         private static string FallbackAddress(string pointType, int index)
         {
             if (pointType == "X" || pointType == "Y")
-                return index < 8 ? $"{pointType}{index}" : $"{pointType}{index + 2}";
+                return pointType + Convert.ToString(index, 8);
             return $"{pointType}{index}";
         }
 

@@ -5,9 +5,16 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>disable</Nullable>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 开发时复制到输出目录方便调试；发布包不携带（CopyToPublishDirectory=Never），
+         避免把开发机的配置覆盖现场配置。程序启动时若无 config.json 会自动生成默认配置。 -->
+    <None Include="config.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- PLC通信库 -->

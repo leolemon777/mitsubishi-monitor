@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -16,6 +17,7 @@ namespace MitsubishiMonitor.Demo.Controls
         {
             InitializeComponent();
             Loaded += OnLoaded;
+            Unloaded += OnUnloaded;
         }
 
         #region 依赖属性
@@ -53,6 +55,10 @@ namespace MitsubishiMonitor.Demo.Controls
         private PlcPointItem[] _xPointItems;
         private PlcPointItem[] _yPointItems;
         private PlcPointItem[] _mPointItems;
+        private PlcStatus _subscribedStatus;
+        private int _xUpdatePending;
+        private int _yUpdatePending;
+        private int _mUpdatePending;
 
         #endregion
 
@@ -60,25 +66,36 @@ namespace MitsubishiMonitor.Demo.Controls
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            SubscribeToStatus(PlcStatus);
             InitializePointItems();
             UpdateGroupVisibility();
+        }
+
+        private void OnUnloaded(object sender, RoutedEventArgs e)
+        {
+            SubscribeToStatus(null);
         }
 
         private static void OnPlcStatusChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
         {
             if (d is PlcPointPanel panel)
             {
-                if (e.OldValue is PlcStatus oldStatus)
-                {
-                    oldStatus.PropertyChanged -= panel.OnPlcStatusPropertyChanged;
-                }
-
-                if (e.NewValue is PlcStatus newStatus)
-                {
-                    newStatus.PropertyChanged += panel.OnPlcStatusPropertyChanged;
+                panel.SubscribeToStatus(panel.IsLoaded ? e.NewValue as PlcStatus : null);
+                if (panel.IsLoaded)
                     panel.UpdateAllPoints();
-                }
             }
+        }
+
+        private void SubscribeToStatus(PlcStatus status)
+        {
+            if (ReferenceEquals(_subscribedStatus, status)) return;
+
+            if (_subscribedStatus != null)
+                _subscribedStatus.PropertyChanged -= OnPlcStatusPropertyChanged;
+
+            _subscribedStatus = status;
+            if (_subscribedStatus != null)
+                _subscribedStatus.PropertyChanged += OnPlcStatusPropertyChanged;
         }
 
         private static void OnPlcConfigChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -91,21 +108,32 @@ namespace MitsubishiMonitor.Demo.Controls
 
         private void OnPlcStatusPropertyChanged(object sender, System.ComponentModel.PropertyChangedEventArgs e)
         {
-            // 当 PlcStatus 的属性变化时，更新对应的点位
-            Dispatcher.BeginInvoke(new Action(() =>
+            // 先过滤，再入 Dispatcher；X0/Y0 等独立属性通知不应创建空的 UI 回调。
+            if (e.PropertyName == nameof(PlcStatus.X))
             {
-                if (e.PropertyName == nameof(PlcStatus.X))
-                {
-                    UpdateXPoints();
-                }
-                else if (e.PropertyName == nameof(PlcStatus.Y))
-                {
-                    UpdateYPoints();
-                }
-                else if (e.PropertyName == nameof(PlcStatus.M))
-                {
-                    UpdateMPoints();
-                }
+                if (Interlocked.Exchange(ref _xUpdatePending, 1) == 0)
+                    QueuePointUpdate(UpdateXPoints, () => Interlocked.Exchange(ref _xUpdatePending, 0));
+            }
+            else if (e.PropertyName == nameof(PlcStatus.Y))
+            {
+                if (Interlocked.Exchange(ref _yUpdatePending, 1) == 0)
+                    QueuePointUpdate(UpdateYPoints, () => Interlocked.Exchange(ref _yUpdatePending, 0));
+            }
+            else if (e.PropertyName == nameof(PlcStatus.M))
+            {
+                if (Interlocked.Exchange(ref _mUpdatePending, 1) == 0)
+                    QueuePointUpdate(UpdateMPoints, () => Interlocked.Exchange(ref _mUpdatePending, 0));
+            }
+        }
+
+        private void QueuePointUpdate(Action update, Action resetPending)
+        {
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() =>
+            {
+                // 先清 pending，再读取当前最新状态；更新期间发生的新变化可以再排一个回调。
+                resetPending();
+                if (IsLoaded)
+                    update();
             }));
         }
 

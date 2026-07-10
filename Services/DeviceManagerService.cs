@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
 using System.Windows;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MitsubishiMonitor.Demo.Models;
 using MitsubishiMonitor.Demo.Services;
@@ -38,7 +39,8 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 Device.IsOnline = true;
                 Device.CurrentTemperature = PlcService.CurrentStatus.Temperature;
-                Device.HasAlert = Device.CurrentTemperature > 90f; // 阈值
+                // 使用 PlcStatus.IsAlarm（由 MitsubishiPlcService 按设定温度计算，非硬编码）
+                Device.HasAlert = PlcService.CurrentStatus.IsAlarm;
                 Device.LastUpdateTime = DateTime.Now;
             }
             else
@@ -66,11 +68,17 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly ObservableCollection<Device> _devices;
         private readonly System.Timers.Timer _monitorTimer;
         private readonly System.Timers.Timer _cleanupTimer;
+        private readonly System.Timers.Timer _operationCountFlushTimer;
         private int _isMonitoring;
         private int _isCleaning;
+        private int _isFlushingOperationCounts;
+        private int _monitorUiUpdatePending;
+        private int _isUpdatingTowerLight;
         private readonly IDataService _dataService;
         private readonly LogBufferService _logBuffer;
+        private readonly AutoExportService _autoExport;
         private TowerLightService _towerLight;
+        private string _lastTowerLightState = "";
 
         /// <summary>
         /// 已用户主动连接过的设备 Id 集合（仅这些设备会触发后台自动重连，避免应用启动后无脑连接）
@@ -82,8 +90,16 @@ namespace MitsubishiMonitor.Demo.Services
         /// </summary>
         private readonly ConcurrentDictionary<int, byte> _reconnectingIds = new();
 
+        /// <summary>
+        /// PLC 点位变化可能很频繁，主界面只需要展示累计次数。
+        /// 这里先在线程安全字典里累计，再由低频定时器批量刷到 UI，避免 Dispatcher 队列被单条更新淹没。
+        /// </summary>
+        private readonly ConcurrentDictionary<int, int> _pendingOperationCountDeltas = new();
+
         // #region agent log - Hypothesis A: 统计10秒内状态变化次数
         public static int DbgStateChangeCount = 0;
+        public int PendingOperationCountUpdateDevices => _pendingOperationCountDeltas.Count;
+        public bool HasPendingMonitorUiUpdate => _monitorUiUpdatePending == 1;
         // #endregion
         /// <summary>
         /// id → Device 快速查找表，避免在线程池线程中遍历 ObservableCollection
@@ -114,6 +130,28 @@ namespace MitsubishiMonitor.Demo.Services
         [ObservableProperty]
         private int _offlineDeviceCount;
 
+        /// <summary>
+        /// 当前是否有温度报警（红灯/黄灯）。用于驱动主界面"消音/复位"按钮的可见性。
+        /// </summary>
+        [ObservableProperty]
+        private bool _hasActiveAlarm;
+
+        private bool _isBuzzerMuted; // 方式B：消音标志
+
+        /// <summary>
+        /// 三色灯复位：方式B
+        /// 仅关闭蜂鸣器，如果当前超温，红灯继续保持常亮。
+        /// 直到所有设备温度降回正常，才会自动清除消音状态，下次再超温时重新响铃。
+        /// </summary>
+        public void AcknowledgeAlarm()
+        {
+            _isBuzzerMuted = true;
+            _lastTowerLightState = ""; // 强制下次更新重新下发指令
+
+            // 立即触发一次状态更新
+            _ = UpdateTowerLightAsync();
+        }
+
         public DeviceManagerService()
         {
             _wrappers = new ObservableCollection<DevicePlcWrapper>();
@@ -122,7 +160,22 @@ namespace MitsubishiMonitor.Demo.Services
 
             _dataService = new DataService();
             _logBuffer = new LogBufferService();
-            Task.Run(async () => await _dataService.InitializeAsync());
+            _autoExport = new AutoExportService();
+
+            // DB 初始化完成后才允许 LogBuffer 写入，避免表不存在导致数据丢失
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await _dataService.InitializeAsync();
+                    _logBuffer.IsDbReady = true;
+                    System.Diagnostics.Debug.WriteLine("[DeviceManager] DB 初始化完成，LogBuffer 写入已启用");
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[DeviceManager] DB 初始化失败: {ex.Message}");
+                }
+            });
 
             // 三色灯初始化移到后台线程，WMI 串口扫描可能耗时数秒甚至数十秒，不能阻塞 UI
             Task.Run(() =>
@@ -138,11 +191,17 @@ namespace MitsubishiMonitor.Demo.Services
             _monitorTimer.AutoReset = true;
             _monitorTimer.Start();
 
-            // 数据库历史数据清理（每小时一次，删除 15 天前的温度/操作日志）
+            // 数据库历史数据清理（每小时一次，删除 30 天前的温度/操作日志）
             _cleanupTimer = new System.Timers.Timer(TimeSpan.FromHours(1).TotalMilliseconds);
             _cleanupTimer.Elapsed += OnCleanupTimerElapsed;
             _cleanupTimer.AutoReset = true;
             _cleanupTimer.Start();
+
+            // 操作次数 UI 刷新节流：PLC 变化日志仍然逐条入库，但主界面计数 1 秒批量刷新一次即可。
+            _operationCountFlushTimer = new System.Timers.Timer(1000);
+            _operationCountFlushTimer.Elapsed += OnOperationCountFlushTimerElapsed;
+            _operationCountFlushTimer.AutoReset = true;
+            _operationCountFlushTimer.Start();
 
             // 启动后立即异步清理一次，避免长期未运行的实例堆积大量历史
             _ = Task.Run(async () =>
@@ -167,7 +226,7 @@ namespace MitsubishiMonitor.Demo.Services
             try
             {
                 await _dataService.CleanOldDataAsync();
-                System.Diagnostics.Debug.WriteLine($"[数据清理] 已删除 15 天前的历史数据");
+                System.Diagnostics.Debug.WriteLine($"[数据清理] 已删除 30 天前的历史数据");
             }
             catch (Exception ex)
             {
@@ -188,86 +247,136 @@ namespace MitsubishiMonitor.Demo.Services
         /// <summary>
         /// 监控所有设备状态（异步执行）
         /// </summary>
-        private async Task MonitorDeviceStatusAsync()
+        private Task MonitorDeviceStatusAsync()
         {
             // #region agent log - Hypothesis B/E: 监控轮询耗时
             var _dbgMonitorSw = System.Diagnostics.Stopwatch.StartNew();
             // #endregion
-            var offlineList = new List<Device>();
+            if (_stopped)
+                return Task.CompletedTask;
 
-            foreach (var wrapper in _wrappers)
+            var snapshots = new List<(DevicePlcWrapper Wrapper, bool IsConnected, float Temperature)>();
+            foreach (var wrapper in _wrappers.ToList())
             {
-                var wasOnline = wrapper.Device.IsOnline;
-                var isCurrentlyConnected = wrapper.PlcService.CurrentStatus.IsConnected;
-
-                // 检测连接状态变化
-                if (wasOnline && !isCurrentlyConnected)
+                var status = wrapper.PlcService.CurrentStatus;
+                var isCurrentlyConnected = status.IsConnected;
+                if (isCurrentlyConnected
+                    && wrapper.PlcService is MitsubishiPlcService mitsubishi
+                    && mitsubishi.IsTemperatureSampleStale(DateTime.Now, out var tempAge))
                 {
-                    // 设备掉线
-                    wrapper.Device.IsOnline = false;
-
-                    DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                    mitsubishi.MarkTemperatureSampleStale(tempAge);
+                    isCurrentlyConnected = false;
+                    Views.MainWindow.DbgLog("DeviceManagerService:TemperatureStale", "温度采样长时间未更新，触发自动重连", new
                     {
-                        Device = wrapper.Device,
-                        WasOnline = true,
-                        IsOnline = false,
-                        ChangeTime = DateTime.Now
-                    });
-
-                    System.Diagnostics.Debug.WriteLine($"[掉线] {wrapper.Device.Name} ({wrapper.Device.IpAddress})");
-
-                    // TODO: 钉钉掉线报警暂时禁用，后续启用时取消注释
-                    // _ = DingTalkService.Instance.SendDeviceOfflineAlertAsync(
-                    //     wrapper.Device.Name,
-                    //     wrapper.Device.IpAddress);
-                }
-                else if (!wasOnline && isCurrentlyConnected)
-                {
-                    // 设备恢复
-                    wrapper.Device.IsOnline = true;
-
-                    DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
-                    {
-                        Device = wrapper.Device,
-                        WasOnline = false,
-                        IsOnline = true,
-                        ChangeTime = DateTime.Now
-                    });
-
-                    System.Diagnostics.Debug.WriteLine($"[恢复] {wrapper.Device.Name} ({wrapper.Device.IpAddress})");
+                        device = wrapper.Device.Name,
+                        wrapper.Device.IpAddress,
+                        ageSeconds = Math.Round(tempAge.TotalSeconds, 1),
+                        intervalMs = mitsubishi.Config.TemperatureInterval,
+                        lastTemperatureSampleTime = status.LastTemperatureSampleTime
+                    }, "TEMP");
                 }
 
-                wrapper.Device.IsOnline = isCurrentlyConnected;
+                var temp = wrapper.PlcService.CurrentStatus.Temperature;
+                snapshots.Add((wrapper, isCurrentlyConnected, temp));
 
-                if (isCurrentlyConnected)
+                if (!isCurrentlyConnected)
                 {
-                    // 从 PLC 状态同步到 Device，列表页才能显示温度等
-                    await wrapper.UpdateStatusAsync();
-                }
-                else
-                {
-                    offlineList.Add(wrapper.Device);
-
-                    // 后台自动重连：仅对"用户曾主动连接成功过"的设备生效
                     TryScheduleReconnect(wrapper);
                 }
             }
 
-            // 更新掉线设备列表
-            App.Current?.Dispatcher.BeginInvoke(() =>
+            var dispatcher = App.Current?.Dispatcher;
+            if (dispatcher != null && Interlocked.Exchange(ref _monitorUiUpdatePending, 1) == 0)
             {
-                OfflineDevices.Clear();
-                foreach (var device in offlineList)
+                try
                 {
-                    OfflineDevices.Add(device);
-                }
+                    dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                    {
+                        try
+                        {
+                            if (_stopped) return;
 
-                OfflineDeviceCount = offlineList.Count;
-                HasOfflineDevices = offlineList.Count > 0;
-            });
+                            var offlineList = new List<Device>();
+                            foreach (var snapshot in snapshots)
+                            {
+                                var device = snapshot.Wrapper.Device;
+                                var wasOnline = device.IsOnline;
+
+                                if (snapshot.IsConnected)
+                                {
+                                    // 只在温度真变化时才赋值（CommunityToolkit 的 SetProperty 内部已比较，
+                                    // 但显式比较可以省去 SetProperty 调用本身 + 让代码意图更清晰）。
+                                    // 注意必须在赋值前算好，赋值后再比较永远为 false。
+                                    var tempChanged = Math.Abs(device.CurrentTemperature - snapshot.Temperature) > 0.05f;
+                                    if (tempChanged)
+                                        device.CurrentTemperature = snapshot.Temperature;
+                                    // 使用 PlcStatus.IsAlarm（已按设定温度判断，非硬编码 90°C）
+                                    var hasAlert = snapshot.Wrapper.PlcService.CurrentStatus.IsAlarm;
+                                    if (device.HasAlert != hasAlert)
+                                        device.HasAlert = hasAlert;
+                                    if (!device.IsOnline)
+                                        device.IsOnline = true;
+
+                                    // LastUpdateTime 只在数据有变化（温度/在线翻转）或上次刷新已超 30s 时更新，
+                                    // 避免 5s 一次无脑写 DateTime.Now 触发不必要的 PropertyChanged + 模板字符串重算。
+                                    var now = DateTime.Now;
+                                    if (!wasOnline ||
+                                        tempChanged ||
+                                        (now - device.LastUpdateTime).TotalSeconds > 30)
+                                    {
+                                        device.LastUpdateTime = now;
+                                    }
+
+                                    if (!wasOnline)
+                                    {
+                                        DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                                        {
+                                            Device = device,
+                                            WasOnline = false,
+                                            IsOnline = true,
+                                            ChangeTime = now
+                                        });
+                                        System.Diagnostics.Debug.WriteLine($"[恢复] {device.Name} ({device.IpAddress})");
+                                    }
+                                }
+                                else
+                                {
+                                    offlineList.Add(device);
+                                    if (device.IsOnline)
+                                        device.IsOnline = false;
+                                    if (device.HasTemperatureSample)
+                                        device.HasTemperatureSample = false;
+
+                                    if (wasOnline)
+                                    {
+                                        DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                                        {
+                                            Device = device,
+                                            WasOnline = true,
+                                            IsOnline = false,
+                                            ChangeTime = DateTime.Now
+                                        });
+                                        System.Diagnostics.Debug.WriteLine($"[掉线] {device.Name} ({device.IpAddress})");
+                                    }
+                                }
+                            }
+
+                            UpdateOfflineDevicesOnUiThread(offlineList);
+                        }
+                        finally
+                        {
+                            Interlocked.Exchange(ref _monitorUiUpdatePending, 0);
+                        }
+                    }));
+                }
+                catch
+                {
+                    Interlocked.Exchange(ref _monitorUiUpdatePending, 0);
+                }
+            }
 
             // 串口发送含 Thread.Sleep(100)，不阻塞当前监控线程
-            Task.Run(() => UpdateTowerLight());
+            _ = UpdateTowerLightAsync();
 
             // #region agent log - Hypothesis B/E: 监控耗时超过1秒报警
             _dbgMonitorSw.Stop();
@@ -276,10 +385,107 @@ namespace MitsubishiMonitor.Demo.Services
                 Views.MainWindow.DbgLog("DeviceManagerService:Monitor", "监控轮询耗时过长", new
                 {
                     elapsedMs = _dbgMonitorSw.ElapsedMilliseconds,
-                    offlineCount = offlineList.Count
+                    offlineCount = snapshots.Count(s => !s.IsConnected)
                 }, "B/E");
             }
             // #endregion
+
+            return Task.CompletedTask;
+        }
+
+        private void UpdateOfflineDevicesOnUiThread(List<Device> offlineList)
+        {
+            var changed = OfflineDevices.Count != offlineList.Count;
+            if (!changed)
+            {
+                for (int i = 0; i < offlineList.Count; i++)
+                {
+                    if (!ReferenceEquals(OfflineDevices[i], offlineList[i]))
+                    {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (changed)
+            {
+                OfflineDevices.Clear();
+                foreach (var device in offlineList)
+                {
+                    OfflineDevices.Add(device);
+                }
+            }
+
+            OfflineDeviceCount = offlineList.Count;
+            HasOfflineDevices = offlineList.Count > 0;
+        }
+
+        private void OnOperationCountFlushTimerElapsed(object sender, ElapsedEventArgs e)
+        {
+            if (_stopped || Interlocked.Exchange(ref _isFlushingOperationCounts, 1) == 1)
+                return;
+
+            var deltas = DrainOperationCountDeltas();
+            if (deltas.Count == 0)
+            {
+                Interlocked.Exchange(ref _isFlushingOperationCounts, 0);
+                return;
+            }
+
+            var dispatcher = App.Current?.Dispatcher;
+            if (dispatcher == null)
+            {
+                RestoreOperationCountDeltas(deltas);
+                Interlocked.Exchange(ref _isFlushingOperationCounts, 0);
+                return;
+            }
+
+            try
+            {
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    try
+                    {
+                        foreach (var kvp in deltas)
+                        {
+                            if (_deviceMap.TryGetValue(kvp.Key, out var device))
+                                device.TodayOperationCount += kvp.Value;
+                        }
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _isFlushingOperationCounts, 0);
+                    }
+                }));
+            }
+            catch
+            {
+                RestoreOperationCountDeltas(deltas);
+                Interlocked.Exchange(ref _isFlushingOperationCounts, 0);
+            }
+        }
+
+        private Dictionary<int, int> DrainOperationCountDeltas()
+        {
+            var deltas = new Dictionary<int, int>();
+            foreach (var key in _pendingOperationCountDeltas.Keys)
+            {
+                if (_pendingOperationCountDeltas.TryRemove(key, out var count) && count > 0)
+                    deltas[key] = count;
+            }
+            return deltas;
+        }
+
+        private void RestoreOperationCountDeltas(Dictionary<int, int> deltas)
+        {
+            foreach (var kvp in deltas)
+            {
+                _pendingOperationCountDeltas.AddOrUpdate(
+                    kvp.Key,
+                    kvp.Value,
+                    (_, current) => current + kvp.Value);
+            }
         }
 
         /// <summary>
@@ -302,10 +508,21 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 try
                 {
+                    if (_stopped || !_autoReconnectIds.ContainsKey(id))
+                        return;
+
                     System.Diagnostics.Debug.WriteLine($"[自动重连] 尝试重连 {w.Device.Name} ({w.Device.IpAddress})");
                     var ok = await w.PlcService.ConnectAsync();
                     if (ok)
                     {
+                        // 用户可能在 ConnectAsync 等待期间点击了主动断开。
+                        // 此时不能让已在途的自动重连把设备重新连上。
+                        if (_stopped || !_autoReconnectIds.ContainsKey(id))
+                        {
+                            w.PlcService.Disconnect();
+                            return;
+                        }
+
                         try { w.PlcService.StartAcquisition(); }
                         catch (Exception sx)
                         {
@@ -353,53 +570,141 @@ namespace MitsubishiMonitor.Demo.Services
         }
 
         /// <summary>
-        /// 根据所有在线设备的实时温度更新三色灯状态：
-        /// 任意设备温度 > 90°C  → 红灯 + 蜂鸣器
-        /// 任意设备温度 > 86°C  → 黄灯（警告），蜂鸣器关
-        /// 至少一台设备在线     → 绿灯（正常），蜂鸣器关
-        /// 全部设备离线         → 灭灯
+        /// 强制刷新三色灯状态（阈值修改后调用，重置状态缓存避免被防重入跳过）
         /// </summary>
-        private void UpdateTowerLight()
+        public void ForceUpdateTowerLight()
+        {
+            _lastTowerLightState = ""; // 强制下次重新下发指令
+            _ = UpdateTowerLightAsync();
+        }
+
+        /// <summary>
+        /// 主程序三色灯当前占用的串口名（未连接成功时为 null）
+        /// </summary>
+        public string TowerLightPortName => _towerLight?.PortName;
+
+        /// <summary>
+        /// 主程序三色灯串口是否已打开（设置页用来判断该口是否被本程序占用）
+        /// </summary>
+        public bool IsTowerLightSerialOpen => _towerLight?.IsConnected ?? false;
+
+        /// <summary>
+        /// 设置页点灯测试：复用主程序常驻的三色灯实例（串口独占，新开实例会打开失败）。
+        /// 红→黄→绿→灭各停留 800ms，结束后强制按真实状态恢复灯色。
+        /// 返回 null 表示成功，否则为错误信息。
+        /// </summary>
+        public async Task<string> TestTowerLightAsync()
+        {
+            var light = _towerLight;
+            if (light == null || !light.IsConnected)
+                return "主程序三色灯未连接";
+
+            try
+            {
+                foreach (var cmd in new[] { "Red", "Yellow", "Green", "Off" })
+                {
+                    if (!await light.SendAsync(cmd).ConfigureAwait(false))
+                        return light.LastError;
+                    await Task.Delay(800).ConfigureAwait(false);
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex.Message;
+            }
+            finally
+            {
+                // 测试改变了实际灯色，清掉状态缓存让监控立即按真实状态重新下发
+                ForceUpdateTowerLight();
+            }
+        }
+
+        /// <summary>
+        /// 根据所有设备状态更新三色灯：
+        /// 任意设备 temp > 报警阈值 → 红灯 + 蜂鸣器
+        /// 所有在线设备无超温       → 绿灯，蜂鸣器关
+        /// 未连接任何设备           → 灭灯
+        /// </summary>
+        public async Task UpdateTowerLightAsync()
         {
             if (_towerLight == null) return;
+            if (Interlocked.Exchange(ref _isUpdatingTowerLight, 1) == 1)
+                return;
 
-            bool anyOnline = false;
-            bool anyWarning = false;   // 温度 > 86°C
-            bool anyAlarm   = false;   // 温度 > 90°C
-
-            foreach (var wrapper in _wrappers)
+            try
             {
-                if (!wrapper.Device.IsOnline)
-                    continue;
+                bool anyOnline = false;
+                bool anyAlarm  = false;  // 温度超过报警阈值 → 红灯
 
-                anyOnline = true;
-                float temp = wrapper.PlcService.CurrentStatus.Temperature;
+                foreach (var wrapper in _wrappers.ToList())
+                {
+                    if (!wrapper.Device.IsOnline)
+                        continue;
 
-                if (temp > 90f)
-                    anyAlarm = true;
-                else if (temp > 86f)
-                    anyWarning = true;
+                    anyOnline = true;
+                    float temp = wrapper.PlcService.CurrentStatus.Temperature;
+                    float threshold = wrapper.PlcService.Config.TemperatureThreshold;
+                    if (threshold <= 0) threshold = 90f;
+
+                    if (temp > threshold) anyAlarm = true;
+                }
+
+                // 更新 HasActiveAlarm（供 UI 复位按钮显示）
+                if (HasActiveAlarm != anyAlarm)
+                {
+                    var dispatcher = App.Current?.Dispatcher;
+                    if (dispatcher != null)
+                        _ = dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background,
+                            new Action(() => HasActiveAlarm = anyAlarm));
+                }
+
+                // 如果所有设备都不在报警状态，清除消音标志，准备迎接下一次报警
+                if (!anyAlarm)
+                {
+                    _isBuzzerMuted = false;
+                }
+
+                // 优先级：红灯（超温+可能蜂鸣）> 绿灯（正常）> 灭灯（未连接）
+                string desiredState;
+                if (anyAlarm)
+                    desiredState = _isBuzzerMuted ? "Red+BuzzerOff" : "Red+BuzzerOn";
+                else if (anyOnline)
+                    desiredState = "Green+BuzzerOff";
+                else
+                    desiredState = "Off";
+
+                // 状态没变不重复写串口
+                if (string.Equals(_lastTowerLightState, desiredState, StringComparison.Ordinal))
+                    return;
+
+                bool ok;
+                switch (desiredState)
+                {
+                    case "Red+BuzzerOn":
+                        ok = (await _towerLight.SendAsync("Red")) & (await _towerLight.SendAsync("BuzzerOn"));
+                        break;
+                    case "Red+BuzzerOff":
+                        ok = (await _towerLight.SendAsync("Red")) & (await _towerLight.SendAsync("BuzzerOff"));
+                        break;
+                    case "Green+BuzzerOff":
+                        ok = (await _towerLight.SendAsync("Green")) & (await _towerLight.SendAsync("BuzzerOff"));
+                        break;
+                    default:
+                        ok = await _towerLight.SendAsync("Off");
+                        break;
+                }
+
+                if (ok)
+                    _lastTowerLightState = desiredState;
             }
-
-            // 优先级：报警 > 警告 > 正常 > 全灭
-            if (anyAlarm)
+            catch (Exception ex)
             {
-                _towerLight.Send("Red");
-                _towerLight.Send("BuzzerOn");
+                System.Diagnostics.Debug.WriteLine($"[三色灯] 更新异常: {ex.Message}");
             }
-            else if (anyWarning)
+            finally
             {
-                _towerLight.Send("Yellow");
-                _towerLight.Send("BuzzerOff");
-            }
-            else if (anyOnline)
-            {
-                _towerLight.Send("Green");
-                _towerLight.Send("BuzzerOff");
-            }
-            else
-            {
-                _towerLight.Send("Off");
+                Interlocked.Exchange(ref _isUpdatingTowerLight, 0);
             }
         }
 
@@ -448,6 +753,11 @@ namespace MitsubishiMonitor.Demo.Services
                         IpAddress = device.IpAddress,
                         Port = device.Port
                     };
+
+                // 从持久化配置中恢复报警阈值（deviceIndex = Id-1）
+                int deviceIndex = config.Id - 1;
+                if (deviceIndex >= 0 && deviceIndex < AppConfig.DeviceThresholds.Length)
+                    plcConfig.TemperatureThreshold = AppConfig.DeviceThresholds[deviceIndex];
 
                 var plcService = new MitsubishiPlcService(plcConfig);
 
@@ -504,17 +814,15 @@ namespace MitsubishiMonitor.Demo.Services
                 },
 
                 // --- M 辅助继电器 ---
-                // MAddressList 与 MReadBlocks 严格对齐：总条目数 = 各块 Count 之和
-                // 合并饰屏中间地址后 TCP 请求从 10 次减少到 4 次
-                MAddressList = Enumerable.Range(1, 12)      // M1-M12  (12个)
-                    .Select(i => $"M{i}")
-                    .Concat(Enumerable.Range(102, 2)         // M102-M103 (2个)
-                        .Select(i => $"M{i}"))
-                    .Concat(Enumerable.Range(110, 21)        // M110-M130 (21个)
-                        .Select(i => $"M{i}"))
-                    .Concat(Enumerable.Range(160, 21)        // M160-M180 (21个)
-                        .Select(i => $"M{i}"))
-                    .ToList(),
+                // MAddressList 只保留界面需要显示/记录的业务散点；
+                // MReadBlocks 可以覆盖中间地址以减少 TCP 请求，但中间位不能进入操作日志。
+                MAddressList = new()
+                {
+                    "M1", "M2", "M3", "M4", "M5", "M6", "M11", "M12",
+                    "M102", "M103",
+                    "M110", "M115", "M120", "M130",
+                    "M160", "M170", "M180",
+                },
                 MReadBlocks = new()
                 {
                     new MReadBlock("M1",   12),   // M1-M12（合并自 M6+M11）
@@ -545,6 +853,7 @@ namespace MitsubishiMonitor.Demo.Services
 
                 // --- 温度地址 ---
                 TemperatureAddress = "D320",
+                TargetTemperatureAddress = "D420", // 反应槽设定温度（用于超温报警判断）
 
                 // --- 无热电偶电压 ---
                 ThermocoupleAAddress = "",
@@ -607,15 +916,13 @@ namespace MitsubishiMonitor.Demo.Services
                     { "Y12", "反应槽加热信号" },
                 },
 
-                // MAddressList 与 MReadBlocks 严格对齐：总条目数 = 各块 Count 之和
-                // 合并后 TCP 请求从 12 次减少到 3 次
-                MAddressList = Enumerable.Range(64, 70)      // M64-M133  (70个)
-                    .Select(i => $"M{i}")
-                    .Concat(Enumerable.Range(204, 9)          // M204-M212 (9个)
-                        .Select(i => $"M{i}"))
-                    .Concat(Enumerable.Range(600, 102)        // M600-M701 (102个)
-                        .Select(i => $"M{i}"))
-                    .ToList(),
+                // 仅保留业务散点；批量读取块仍覆盖连续区间，读取后按地址映射回来。
+                MAddressList = new()
+                {
+                    "M64", "M74", "M101", "M111", "M124", "M127", "M128", "M133",
+                    "M204", "M205", "M206", "M207", "M208", "M209", "M210", "M211", "M212",
+                    "M600", "M610", "M701",
+                },
                 MReadBlocks = new()
                 {
                     new MReadBlock("M64",  70),   // M64-M133（合并 8 个散点）
@@ -659,7 +966,8 @@ namespace MitsubishiMonitor.Demo.Services
                 },
 
                 TemperatureAddress = "D10",
-                TemperatureIsWord = true,  // D10为16位Word寄存器，非DINT，用ReadInt16读取
+                TemperatureIsWord = true,        // D10为16位Word寄存器，非DINT，用ReadInt16读取
+                TargetTemperatureAddress = "D280", // 与设备4一致，反应槽第一道设定温度
                 ThermocoupleAAddress = "",
                 ThermocoupleBAddress = "",
                 ThermocoupleCAddress = "",
@@ -726,8 +1034,8 @@ namespace MitsubishiMonitor.Demo.Services
                     { "Y16", "三色灯红灯" },
                 },
 
-                // MAddressList 与 MReadBlocks 严格对齐：总条目数(28) = 各块 Count 之和(28)
-                // 只列出用户指定的点，按散点分小块读取，面板不显示多余 M 点
+                // MAddressList 只列出界面需要显示/记录的散点。
+                // MReadBlocks 按通信效率合并成大块读取，再由 MitsubishiPlcService 按地址映射回散点数组。
                 MAddressList = new List<string>
                 {
                     // 步骤指示灯（8个）
@@ -743,16 +1051,9 @@ namespace MitsubishiMonitor.Demo.Services
                 },
                 MReadBlocks = new()
                 {
-                    new MReadBlock("M64",   1),   // 步骤三指示灯
-                    new MReadBlock("M74",   1),   // 步骤八指示灯
-                    new MReadBlock("M104",  1),   // 步骤六指示灯
-                    new MReadBlock("M111",  1),   // 步骤一指示灯
-                    new MReadBlock("M124",  1),   // 步骤二指示灯
-                    new MReadBlock("M127",  2),   // 步骤五指示灯(M127) + 步骤七指示灯(M128)
-                    new MReadBlock("M133",  1),   // 步骤四指示灯
+                    new MReadBlock("M64",  70),   // 覆盖步骤指示灯 M64-M133
                     new MReadBlock("M204",  9),   // 手动控制 M204-M212
-                    new MReadBlock("M600",  2),   // 系统停止(M600) + 步骤一执行(M601)
-                    new MReadBlock("M603",  8),   // 步骤二-八执行(M603-M609) + 系统复位(M610)
+                    new MReadBlock("M600", 11),   // 系统/步骤执行 M600-M610
                     new MReadBlock("M701",  1),   // 允许启动指示灯
                 },
                 MPointLabels = new()
@@ -801,7 +1102,7 @@ namespace MitsubishiMonitor.Demo.Services
 
                 TemperatureAddress = "D10",
                 TemperatureIsWord = true,      // D10 为 16 位 Word 寄存器
-                TemperatureDivisor = 100f,     // D10 存储 temp×100（如 7000=70.0°C），显示需除以100
+                TemperatureDivisor = 10f,      // D10 存储 temp×10（如 845=84.5°C），显示需除以10
                 TargetTemperatureAddress = "D280", // 反应槽第一道设定温度（用于报警判断）
                 ThermocoupleAAddress = "",
                 ThermocoupleBAddress = "",
@@ -822,21 +1123,19 @@ namespace MitsubishiMonitor.Demo.Services
             };
         }
 
-        /// <summary>
-        /// 连接指定设备
-        /// </summary>
         public async Task<bool> ConnectDeviceAsync(int deviceId)
         {
             var wrapper = _wrappers.FirstOrDefault(d => d.Device.Id == deviceId);
             if (wrapper == null) return false;
+
+            // 只要触发了连接，都记入自动重连白名单，保证即使当前PLC未开机，后续开机时也会自动连上。
+            _autoReconnectIds.TryAdd(deviceId, 0);
 
             var success = await wrapper.PlcService.ConnectAsync();
             if (success)
             {
                 wrapper.PlcService.StartAcquisition();
                 UpdateDeviceOnlineState(wrapper, true);
-                // 记入自动重连白名单：掉线后允许后台自动恢复
-                _autoReconnectIds.TryAdd(deviceId, 0);
             }
             return success;
         }
@@ -863,35 +1162,105 @@ namespace MitsubishiMonitor.Demo.Services
         public async Task<(int successCount, List<string> failedReasons)> ConnectAllDevicesAsync()
         {
             var failedReasons = new List<string>();
-            var tasks = _wrappers.Select(async wrapper =>
+            // 保留锁参数，兼容 ConnectOneAsync；当前启动链路改为顺序错峰连接。
+            var failedReasonsLock = new object();
+
+            var wrapperList = _wrappers.ToList();
+            var totalSw = System.Diagnostics.Stopwatch.StartNew();
+            Views.MainWindow.DbgLog("DeviceManagerService:ConnectAll", "开始顺序连接全部 PLC", new
             {
-                try
+                count = wrapperList.Count
+            }, "CONNECT");
+
+            // 工控机现场更怕启动瞬间卡死，不追求 4 台同时抢连。
+            // 按顺序连接 + 每台采集定时器错峰，避免开机就并发打满 PLC/TCP/线程池。
+            for (int i = 0; i < wrapperList.Count; i++)
+            {
+                await ConnectOneAsync(wrapperList[i], i, failedReasons, failedReasonsLock);
+
+                if (i < wrapperList.Count - 1)
+                    await Task.Delay(300);
+            }
+
+            int successCount = wrapperList.Count(w => w.PlcService.CurrentStatus.IsConnected);
+            totalSw.Stop();
+            Views.MainWindow.DbgLog("DeviceManagerService:ConnectAll", "全部 PLC 连接流程结束", new
+            {
+                elapsedMs = totalSw.ElapsedMilliseconds,
+                successCount,
+                total = wrapperList.Count,
+                failedReasons = failedReasons.ToArray()
+            }, "CONNECT");
+            return (successCount, failedReasons);
+        }
+
+        private async Task ConnectOneAsync(
+            DevicePlcWrapper wrapper, int orderIndex,
+            List<string> failedReasons, object failedReasonsLock)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "开始连接 PLC", new
                 {
-                    var success = await wrapper.PlcService.ConnectAsync();
-                    if (success)
+                    device = wrapper.Device.Name,
+                    wrapper.Device.IpAddress,
+                    orderIndex
+                }, "CONNECT");
+
+                // 只要触发了连接（无论是启动自动连接还是手动连接全部），都记入自动重连白名单，保证即使当前PLC未开机，后续开机时也会自动连上。
+                _autoReconnectIds.TryAdd(wrapper.Device.Id, 0);
+
+                var success = await wrapper.PlcService.ConnectAsync();
+                if (success)
+                {
+                    // 错峰：每台设备的采集启动延迟 orderIndex * 250ms。
+                    // 4 台叠加 = 0/250/500/750ms，1s 周期内被打散，10s 周期同样均匀分布。
+                    if (orderIndex > 0)
+                        await Task.Delay(orderIndex * 250);
+
+                    wrapper.PlcService.StartAcquisition();
+                    UpdateDeviceOnlineState(wrapper, true);
+                    sw.Stop();
+                    Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接成功并启动采集", new
                     {
-                        wrapper.PlcService.StartAcquisition();
-                        UpdateDeviceOnlineState(wrapper, true);
-                        // 记入自动重连白名单：掉线后允许后台自动恢复
-                        _autoReconnectIds.TryAdd(wrapper.Device.Id, 0);
-                    }
-                    else
+                        device = wrapper.Device.Name,
+                        wrapper.Device.IpAddress,
+                        elapsedMs = sw.ElapsedMilliseconds
+                    }, "CONNECT");
+                }
+                else
+                {
+                    var err = (wrapper.PlcService as MitsubishiPlcService)?.LastConnectionError;
+                    if (!string.IsNullOrEmpty(err))
                     {
-                        var err = (wrapper.PlcService as MitsubishiPlcService)?.LastConnectionError;
-                        if (!string.IsNullOrEmpty(err))
+                        lock (failedReasonsLock)
                             failedReasons.Add($"{wrapper.Device.Name}: {err}");
                     }
+                    sw.Stop();
+                    Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接失败", new
+                    {
+                        device = wrapper.Device.Name,
+                        wrapper.Device.IpAddress,
+                        elapsedMs = sw.ElapsedMilliseconds,
+                        error = err
+                    }, "CONNECT");
                 }
-                catch (Exception ex)
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                System.Diagnostics.Debug.WriteLine($"连接设备 {wrapper.Device.Name} 失败: {ex.Message}");
+                Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接异常", new
                 {
-                    System.Diagnostics.Debug.WriteLine($"连接设备 {wrapper.Device.Name} 失败: {ex.Message}");
+                    device = wrapper.Device.Name,
+                    wrapper.Device.IpAddress,
+                    elapsedMs = sw.ElapsedMilliseconds,
+                    error = ex.Message
+                }, "CONNECT");
+                lock (failedReasonsLock)
                     failedReasons.Add($"{wrapper.Device.Name}: {ex.Message}");
-                }
-            });
-
-            await Task.WhenAll(tasks);
-            int successCount = _wrappers.Count(w => w.PlcService.CurrentStatus.IsConnected);
-            return (successCount, failedReasons);
+            }
         }
 
         /// <summary>
@@ -927,6 +1296,8 @@ namespace MitsubishiMonitor.Demo.Services
                 var device = wrapper.Device;
                 var wasOnline = device.IsOnline;
                 device.IsOnline = isOnline;
+                if (!isOnline)
+                    device.HasTemperatureSample = false;
                 device.LastUpdateTime = DateTime.Now;
                 if (wasOnline != isOnline)
                 {
@@ -943,10 +1314,10 @@ namespace MitsubishiMonitor.Demo.Services
             if (Application.Current?.Dispatcher.CheckAccess() == true)
                 Update();
             else
-                Application.Current?.Dispatcher.BeginInvoke(Update);
+                Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Update));
 
             // 串口发送含 Thread.Sleep(100)，不阻塞 UI 线程
-            Task.Run(() => UpdateTowerLight());
+            _ = UpdateTowerLightAsync();
         }
 
         /// <summary>
@@ -973,10 +1344,12 @@ namespace MitsubishiMonitor.Demo.Services
             if (_deviceMap.TryGetValue(deviceId, out var device))
             {
                 log.DeviceName = device.Name ?? string.Empty;
-                App.Current?.Dispatcher.BeginInvoke(() => device.TodayOperationCount++);
+                _pendingOperationCountDeltas.AddOrUpdate(deviceId, 1, (_, current) => current + 1);
             }
 
             _logBuffer.EnqueueOperationLog(log);
+            // 入队自动导出 HTML（后台 3 秒批量落盘，不在事件线程做磁盘 IO）
+            _autoExport.AppendOperationLog(log);
         }
 
         /// <summary>
@@ -1004,10 +1377,50 @@ namespace MitsubishiMonitor.Demo.Services
                     Threshold = e.TargetTemperature
                 };
                 _logBuffer.EnqueueTemperatureLog(log);
+                // 入队自动导出 HTML（后台 3 秒批量落盘，不在事件线程做磁盘 IO）
+                _autoExport.AppendTemperatureLog(log);
+                UpdateDeviceTemperatureFromSample(deviceId, e);
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[温度入库] 设备{deviceId} 入队失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 温度采样已经成功返回时，直接同步到主界面设备卡片。
+        /// 不再只依赖 5s 监控轮询从 CurrentStatus 抄数，避免“后台已入库但主界面仍显示 --.-°C”。
+        /// </summary>
+        private void UpdateDeviceTemperatureFromSample(int deviceId, TemperatureSampleEventArgs e)
+        {
+            if (!_deviceMap.TryGetValue(deviceId, out var device))
+                return;
+
+            var dispatcher = App.Current?.Dispatcher;
+            if (dispatcher == null)
+                return;
+
+            void Update()
+            {
+                if (_stopped) return;
+
+                device.CurrentTemperature = e.Temperature;
+                device.HasTemperatureSample = true;
+                // IsAbnormal 由 MitsubishiPlcService 按设定温度判断，直接使用，无需硬编码 90°C
+                device.HasAlert = e.IsAbnormal;
+                device.LastUpdateTime = e.SampleTime;
+            }
+
+            try
+            {
+                if (dispatcher.CheckAccess())
+                    Update();
+                else
+                    _ = dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Update));
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[温度显示] 设备{deviceId} 主界面同步失败: {ex.Message}");
             }
         }
 
@@ -1028,6 +1441,14 @@ namespace MitsubishiMonitor.Demo.Services
             return _devices.FirstOrDefault(d => d.Id == deviceId);
         }
 
+        /// <summary>
+        /// 运行时更新自动导出目录（设置保存后立即生效，无需重启）
+        /// </summary>
+        public void UpdateAutoExportPath(string path)
+        {
+            _autoExport.UpdateExportPath(path);
+        }
+
         private bool _stopped;
 
         /// <summary>
@@ -1040,12 +1461,26 @@ namespace MitsubishiMonitor.Demo.Services
 
             try { _monitorTimer?.Stop(); _monitorTimer?.Dispose(); } catch { }
             try { _cleanupTimer?.Stop(); _cleanupTimer?.Dispose(); } catch { }
+            try { _operationCountFlushTimer?.Stop(); _operationCountFlushTimer?.Dispose(); } catch { }
+            try { FlushOperationCountDeltasOnShutdown(); } catch { }
 
             DisconnectAllDevices();
 
             try { _towerLight?.Dispose(); } catch { }
             try { _logBuffer?.Dispose(); } catch { }
+            try { _autoExport?.Dispose(); } catch { }
             try { (_dataService as IDisposable)?.Dispose(); } catch { }
+            System.Diagnostics.Debug.WriteLine("[DeviceManager] 已停止，AutoExport 文件已关闭");
+        }
+
+        private void FlushOperationCountDeltasOnShutdown()
+        {
+            var deltas = DrainOperationCountDeltas();
+            foreach (var kvp in deltas)
+            {
+                if (_deviceMap.TryGetValue(kvp.Key, out var device))
+                    device.TodayOperationCount += kvp.Value;
+            }
         }
     }
 

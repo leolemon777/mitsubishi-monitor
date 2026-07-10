@@ -29,6 +29,21 @@ namespace MitsubishiMonitor.Demo.Services
         private bool _isAcquiring;
         private int _isReadingXY = 0;   // 0=空闲 1=采集中，Interlocked 原子操作防重入
         private int _isReadingTemp = 0;  // 0=空闲 1=采集中，Interlocked 原子操作防重入
+        private DateTime _acquisitionStartedAt;
+        private readonly SemaphoreSlim _plcIoLock = new(1, 1);
+        private readonly SemaphoreSlim _connectLock = new(1, 1);
+        private readonly object _connectionCloseSync = new();
+        private Task _pendingConnectionClose = Task.CompletedTask;
+        private long _connectionGeneration;
+        private long _ioFailureVersion;
+        private long _lastSlowIoLogMs;
+        private long _lastIoFailureLogMs;
+        private int _isDisposed;
+
+        // 连续读取失败计数：无线网桥偶发丢一两个包很常见，连续失败达到阈值才判离线，
+        // 避免单次抖动触发"掉线→重连"振荡和误报警。整轮采集成功后清零。
+        private int _consecutiveIoFailures = 0;
+        private const int OfflineAfterConsecutiveFailures = 2;
 
         public event EventHandler<bool> ConnectionStateChanged;
         public event EventHandler<StateChangeEvent> StateChanged;
@@ -47,12 +62,36 @@ namespace MitsubishiMonitor.Demo.Services
         /// </summary>
         public string LastConnectionError { get; private set; } = "";
 
+        public bool IsTemperatureSampleStale(DateTime now, out TimeSpan age)
+        {
+            age = TimeSpan.Zero;
+            if (!_isAcquiring || !_isConnected)
+                return false;
+
+            var baseline = _status.LastTemperatureSampleTime == default
+                ? _acquisitionStartedAt
+                : _status.LastTemperatureSampleTime;
+
+            if (baseline == default)
+                return false;
+
+            age = now - baseline;
+            var staleAfterMs = Math.Max(_config.TemperatureInterval * 4, _config.TemperatureInterval + 30_000);
+            return age.TotalMilliseconds > staleAfterMs;
+        }
+
+        public void MarkTemperatureSampleStale(TimeSpan age)
+        {
+            // 已经停滞了多个温度周期，不属于单次抖动，跳过容错计数直接断线进入重连
+            HandleConnectionFailure($"温度采样超过 {age.TotalSeconds:F0} 秒未更新", immediate: true);
+        }
+
         public MitsubishiPlcService()
         {
             _config = new PlcConfig();
             _status = new PlcStatus(_config.XCount, _config.YCount, _config.ActualMCount);
             _plc = new MelsecA1ENet(_config.IpAddress, _config.Port);
-            _plc.ReceiveTimeOut = 3000;  // 读取超时3秒，防止无线丢包时TCP读挂死
+            _plc.ReceiveTimeOut = 2000;  // 读取超时2秒，防止无线丢包时TCP读挂死
             _lastX = new bool[_config.XCount];
             _lastY = new bool[_config.YCount];
             _lastM = new bool[_config.ActualMCount];
@@ -66,7 +105,7 @@ namespace MitsubishiMonitor.Demo.Services
             _config = config;
             _status = new PlcStatus(_config.XCount, _config.YCount, _config.ActualMCount);
             _plc = new MelsecA1ENet(_config.IpAddress, _config.Port);
-            _plc.ReceiveTimeOut = 3000;  // 读取超时3秒，防止无线丢包时TCP读挂死
+            _plc.ReceiveTimeOut = 2000;  // 读取超时2秒，防止无线丢包时TCP读挂死
             _lastX = new bool[_config.XCount];
             _lastY = new bool[_config.YCount];
             _lastM = new bool[_config.ActualMCount];
@@ -78,33 +117,167 @@ namespace MitsubishiMonitor.Demo.Services
             // }
         }
 
-        public async Task<bool> ConnectAsync()
+        /// <summary>
+        /// HslCommunication 的同一个 MelsecA1ENet 实例底层复用同一条 TCP 连接。
+        /// 同一台 PLC 的 X/Y/M/温度/C 寄存器如果并发读，现场网络抖动时容易互相抢连接、
+        /// 堵住线程池，最终表现成主界面卡死。这里把每台 PLC 内部的阻塞通信串行化。
+        /// </summary>
+        private async Task<T> RunPlcCallAsync<T>(string operationName, Func<T> action)
         {
+            await _plcIoLock.WaitAsync().ConfigureAwait(false);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                // 手动点击“连接”可能从 UI 线程进入这里，HslCommunication 是同步阻塞 API。
+                // UI 线程上必须丢到后台跑；采集定时器本来就在后台线程，直接执行可避免双层 Task.Run。
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher != null && dispatcher.CheckAccess())
+                    return await Task.Run(action).ConfigureAwait(false);
+
+                return action();
+            }
+            finally
+            {
+                sw.Stop();
+                _plcIoLock.Release();
+                LogSlowIo(operationName, sw.ElapsedMilliseconds);
+            }
+        }
+
+        private void LogSlowIo(string operationName, long elapsedMs)
+        {
+            if (elapsedMs < 1000) return;
+
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var lastMs = Interlocked.Read(ref _lastSlowIoLogMs);
+            if (nowMs - lastMs < 5000) return;
+            Interlocked.Exchange(ref _lastSlowIoLogMs, nowMs);
+
+            Views.MainWindow.DbgLog("MitsubishiPlcService:SlowIo", "PLC 请求耗时过长", new
+            {
+                device = _config.Name,
+                _config.IpAddress,
+                operationName,
+                elapsedMs,
+                generation = Interlocked.Read(ref _connectionGeneration)
+            }, "PLC_IO");
+        }
+
+        private void LogIoFailure(string reason, int failures, bool immediate)
+        {
+            var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var lastMs = Interlocked.Read(ref _lastIoFailureLogMs);
+            if (nowMs - lastMs < 5000) return;
+            Interlocked.Exchange(ref _lastIoFailureLogMs, nowMs);
+
+            Views.MainWindow.DbgLog("MitsubishiPlcService:IoFailure", "PLC 通信失败", new
+            {
+                device = _config.Name,
+                _config.IpAddress,
+                reason,
+                failures,
+                immediate,
+                generation = Interlocked.Read(ref _connectionGeneration)
+            }, "PLC_IO");
+        }
+
+        private Task GetPendingConnectionClose()
+        {
+            lock (_connectionCloseSync)
+                return _pendingConnectionClose;
+        }
+
+        private Task ScheduleConnectionClose(long expectedGeneration)
+        {
+            lock (_connectionCloseSync)
+            {
+                var previous = _pendingConnectionClose;
+                _pendingConnectionClose = CloseConnectionAfterAsync(previous, expectedGeneration);
+                return _pendingConnectionClose;
+            }
+        }
+
+        private async Task CloseConnectionAfterAsync(Task previous, long expectedGeneration)
+        {
+            try { await previous.ConfigureAwait(false); } catch { }
+
+            await _plcIoLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // 旧连接的延迟关闭不能误伤已经建立的新连接。
+                if (!_isConnected && Interlocked.Read(ref _connectionGeneration) == expectedGeneration)
+                    _plc.ConnectClose();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PLC连接] 关闭连接异常: {_config.Name} - {ex.Message}");
+            }
+            finally
+            {
+                _plcIoLock.Release();
+            }
+        }
+
+        private long SetDisconnectedState(string reason, bool notify)
+        {
+            var wasConnected = _isConnected || _status.IsConnected;
+            var generation = Interlocked.Increment(ref _connectionGeneration);
+            _isConnected = false;
+            _status.IsConnected = false;
+            LastConnectionError = reason ?? "";
+            if (notify && wasConnected)
+                ConnectionStateChanged?.Invoke(this, false);
+            return generation;
+        }
+
+        private bool IsConnectionCurrent(long generation)
+            => _isConnected && Interlocked.Read(ref _connectionGeneration) == generation;
+
+        private void ResetTemperatureFreshness()
+        {
+            _acquisitionStartedAt = DateTime.Now;
+            _status.LastTemperatureSampleTime = default;
+        }
+
+        public async Task<bool> ConnectAsync()
+        {
+            if (Volatile.Read(ref _isDisposed) == 1)
+                return false;
+
+            await _connectLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (_isConnected && _status.IsConnected)
+                    return true;
+
+                // 等待上一代连接完成关闭，避免 ConnectServer 与延迟 ConnectClose 交错。
+                await GetPendingConnectionClose().ConfigureAwait(false);
+
                 _plc.IpAddress = _config.IpAddress;
                 _plc.Port = _config.Port;
                 _plc.ConnectTimeOut = _config.ConnectTimeout;
 
                 System.Diagnostics.Debug.WriteLine($"[PLC连接] 尝试连接 {_config.Name} ({_config.IpAddress}:{_config.Port})");
 
-                var result = await Task.Run(() => _plc.ConnectServer());
+                var result = await RunPlcCallAsync("ConnectServer", () => _plc.ConnectServer()).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
                     LastConnectionError = "";
+                    Interlocked.Exchange(ref _consecutiveIoFailures, 0);
+                    Interlocked.Increment(ref _connectionGeneration);
                     _isConnected = true;
                     _status.IsConnected = true;
+                    if (_isAcquiring)
+                        ResetTemperatureFreshness();
                     ConnectionStateChanged?.Invoke(this, true);
                     System.Diagnostics.Debug.WriteLine($"[PLC连接] ✓ 连接成功: {_config.Name}");
                     return true;
                 }
                 else
                 {
-                    LastConnectionError = result.Message ?? "未知错误";
-                    _isConnected = false;
-                    _status.IsConnected = false;
-                    ConnectionStateChanged?.Invoke(this, false);
+                    var generation = SetDisconnectedState(result.Message ?? "未知错误", notify: true);
+                    _ = ScheduleConnectionClose(generation);
                     System.Diagnostics.Debug.WriteLine($"[PLC连接] ✗ 连接失败: {_config.Name} - {LastConnectionError}");
                     return false;
                 }
@@ -113,32 +286,74 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 LastConnectionError = ex.Message ?? "未知异常";
                 System.Diagnostics.Debug.WriteLine($"[PLC连接] ✗ 连接异常: {_config.Name} - {LastConnectionError}");
-                _status.IsConnected = false;
-                ConnectionStateChanged?.Invoke(this, false);
+                var generation = SetDisconnectedState(LastConnectionError, notify: true);
+                _ = ScheduleConnectionClose(generation);
                 return false;
+            }
+            finally
+            {
+                _connectLock.Release();
             }
         }
 
         public void Disconnect()
         {
             StopAcquisition();
-            _plc.ConnectClose();
-            _isConnected = false;
-            _status.IsConnected = false;
-            ConnectionStateChanged?.Invoke(this, false);
+            var generation = SetDisconnectedState("用户主动断开", notify: true);
+            _ = ScheduleConnectionClose(generation);
+        }
+
+        /// <summary>
+        /// 读取失败统一处理。默认按"连续失败计数"容错：未达到阈值只记录不断线；
+        /// immediate=true 用于温度采样长时间停滞这类已经累积多个周期的判定，直接断线。
+        /// </summary>
+        private void HandleConnectionFailure(string reason, bool immediate = false, long? expectedGeneration = null)
+        {
+            if (expectedGeneration.HasValue &&
+                Interlocked.Read(ref _connectionGeneration) != expectedGeneration.Value)
+                return;
+
+            Interlocked.Increment(ref _ioFailureVersion);
+
+            if (!_isConnected)
+                return;
+
+            int failures = Volatile.Read(ref _consecutiveIoFailures);
+            if (!immediate)
+            {
+                failures = Interlocked.Increment(ref _consecutiveIoFailures);
+                LogIoFailure(reason, failures, immediate: false);
+                if (failures < OfflineAfterConsecutiveFailures)
+                {
+                    LastConnectionError = reason;
+                    System.Diagnostics.Debug.WriteLine($"[PLC连接] ⚠ 读取失败 {failures}/{OfflineAfterConsecutiveFailures}，暂不判离线: {_config.Name} - {reason}");
+                    return;
+                }
+            }
+            else
+            {
+                LogIoFailure(reason, failures, immediate: true);
+            }
+
+            var generation = SetDisconnectedState(reason, notify: true);
+            System.Diagnostics.Debug.WriteLine($"[PLC连接] ✗ 自动检测离线: {_config.Name} - {reason}");
+            _ = ScheduleConnectionClose(generation);
         }
 
         public async Task<bool[]> ReadXPointsAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                 {
                     System.Diagnostics.Debug.WriteLine($"[X点读取] ⚠ 未连接，跳过读取");
                     return new bool[_config.XCount];
                 }
 
-                var result = await Task.Run(() => _plc.ReadBool(_config.XStartAddress, (ushort)_config.XCount));
+                var result = await RunPlcCallAsync(
+                    $"ReadBool {_config.XStartAddress}×{_config.XCount}",
+                    () => _plc.ReadBool(_config.XStartAddress, (ushort)_config.XCount)).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
@@ -154,18 +369,17 @@ namespace MitsubishiMonitor.Demo.Services
                 else
                 {
                     System.Diagnostics.Debug.WriteLine($"[X点读取] ✗ 失败: {result.Message} (错误码: {result.ErrorCode})");
-
-                    if (result.ErrorCode == 1013)
-                    {
-                        _isConnected = false;
-                        _status.IsConnected = false;
-                        ConnectionStateChanged?.Invoke(this, false);
-                    }
+                    HandleConnectionFailure(
+                        $"读取X点 {_config.XStartAddress}×{_config.XCount} 失败: {result.Message}",
+                        expectedGeneration: connectionGeneration);
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[X点读取] ✗ 异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取X点 {_config.XStartAddress}×{_config.XCount} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return new bool[_config.XCount];
@@ -173,12 +387,15 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<bool[]> ReadYPointsAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return new bool[_config.YCount];
 
-                var result = await Task.Run(() => _plc.ReadBool(_config.YStartAddress, (ushort)_config.YCount));
+                var result = await RunPlcCallAsync(
+                    $"ReadBool {_config.YStartAddress}×{_config.YCount}",
+                    () => _plc.ReadBool(_config.YStartAddress, (ushort)_config.YCount)).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
@@ -187,11 +404,17 @@ namespace MitsubishiMonitor.Demo.Services
                 else
                 {
                     System.Diagnostics.Debug.WriteLine($"[Y点读取] ✗ 失败: {result.Message}");
+                    HandleConnectionFailure(
+                        $"读取Y点 {_config.YStartAddress}×{_config.YCount} 失败: {result.Message}",
+                        expectedGeneration: connectionGeneration);
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[Y点读取] ✗ 异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取Y点 {_config.YStartAddress}×{_config.YCount} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return new bool[_config.YCount];
@@ -200,19 +423,64 @@ namespace MitsubishiMonitor.Demo.Services
         public async Task<bool[]> ReadMPointsAsync()
         {
             int totalCount = _config.ActualMCount;
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return new bool[totalCount];
 
                 // 使用 MReadBlocks 配置驱动的读取
                 if (_config.MReadBlocks != null && _config.MReadBlocks.Count > 0)
                 {
                     var combined = new bool[totalCount];
+
+                    if (_config.MAddressList != null && _config.MAddressList.Count > 0)
+                    {
+                        var valuesByAddress = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var block in _config.MReadBlocks)
+                        {
+                            var result = await RunPlcCallAsync(
+                                $"ReadBool {block.StartAddress}×{block.Count}",
+                                () => _plc.ReadBool(block.StartAddress, block.Count)).ConfigureAwait(false);
+                            if (result.IsSuccess)
+                            {
+                                if (!TryParseMAddress(block.StartAddress, out var startNumber))
+                                {
+                                    System.Diagnostics.Debug.WriteLine($"读取M块 {block.StartAddress}×{block.Count} 失败: 起始地址格式无效");
+                                    continue;
+                                }
+
+                                int copyLen = Math.Min(result.Content.Length, block.Count);
+                                for (int i = 0; i < copyLen; i++)
+                                {
+                                    valuesByAddress[$"M{startNumber + i}"] = result.Content[i];
+                                }
+                            }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine($"读取M块 {block.StartAddress}×{block.Count} 失败: {result.Message}");
+                                HandleConnectionFailure(
+                                    $"读取M点块 {block.StartAddress}×{block.Count} 失败: {result.Message}",
+                                    expectedGeneration: connectionGeneration);
+                                return new bool[totalCount];
+                            }
+                        }
+
+                        for (int i = 0; i < Math.Min(totalCount, _config.MAddressList.Count); i++)
+                        {
+                            if (valuesByAddress.TryGetValue(_config.MAddressList[i], out var value))
+                                combined[i] = value;
+                        }
+
+                        return combined;
+                    }
+
                     int offset = 0;
                     foreach (var block in _config.MReadBlocks)
                     {
-                        var result = await Task.Run(() => _plc.ReadBool(block.StartAddress, block.Count));
+                        var result = await RunPlcCallAsync(
+                            $"ReadBool {block.StartAddress}×{block.Count}",
+                            () => _plc.ReadBool(block.StartAddress, block.Count)).ConfigureAwait(false);
                         if (result.IsSuccess)
                         {
                             int copyLen = Math.Min(result.Content.Length, totalCount - offset);
@@ -222,15 +490,34 @@ namespace MitsubishiMonitor.Demo.Services
                         else
                         {
                             System.Diagnostics.Debug.WriteLine($"读取M块 {block.StartAddress}×{block.Count} 失败: {result.Message}");
-                            offset += block.Count;
+                            HandleConnectionFailure(
+                                $"读取M点块 {block.StartAddress}×{block.Count} 失败: {result.Message}",
+                                expectedGeneration: connectionGeneration);
+                            return new bool[totalCount];
                         }
                     }
                     return combined;
                 }
 
                 // 旧逻辑兼容：M2009-M2016 + M2451-M2452
-                var result1 = await Task.Run(() => _plc.ReadBool("M2009", 8));
-                var result2 = await Task.Run(() => _plc.ReadBool("M2451", 2));
+                var result1 = await RunPlcCallAsync(
+                    "ReadBool M2009×8", () => _plc.ReadBool("M2009", 8)).ConfigureAwait(false);
+                if (!result1.IsSuccess)
+                {
+                    HandleConnectionFailure(
+                        $"读取M2009×8失败: {result1.Message}",
+                        expectedGeneration: connectionGeneration);
+                    return new bool[totalCount];
+                }
+                var result2 = await RunPlcCallAsync(
+                    "ReadBool M2451×2", () => _plc.ReadBool("M2451", 2)).ConfigureAwait(false);
+                if (!result2.IsSuccess)
+                {
+                    HandleConnectionFailure(
+                        $"读取M2451×2失败: {result2.Message}",
+                        expectedGeneration: connectionGeneration);
+                    return new bool[totalCount];
+                }
 
                 if (result1.IsSuccess && result2.IsSuccess)
                 {
@@ -243,9 +530,25 @@ namespace MitsubishiMonitor.Demo.Services
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取M点异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取M点异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return new bool[totalCount];
+        }
+
+        private static bool TryParseMAddress(string address, out int number)
+        {
+            number = 0;
+            if (string.IsNullOrWhiteSpace(address))
+                return false;
+
+            address = address.Trim();
+            if (!address.StartsWith("M", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return int.TryParse(address.Substring(1), out number);
         }
 
         /// <summary>
@@ -254,12 +557,13 @@ namespace MitsubishiMonitor.Demo.Services
         public async Task<Dictionary<string, int>> ReadCRegistersAsync()
         {
             var values = new Dictionary<string, int>();
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             if (_config.CRegisters == null || _config.CRegisters.Count == 0)
                 return values;
 
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return values;
 
                 foreach (var reg in _config.CRegisters)
@@ -272,41 +576,54 @@ namespace MitsubishiMonitor.Demo.Services
                     {
                         if (reg.PreferInt16)
                         {
-                            var result16 = await Task.Run(() => _plc.ReadInt16(addr, 1));
+                            var result16 = await RunPlcCallAsync(
+                                $"ReadInt16 {addr}", () => _plc.ReadInt16(addr, 1)).ConfigureAwait(false);
                             if (result16.IsSuccess && result16.Content.Length >= 1)
                                 values[reg.Address] = result16.Content[0];
                             else
                             {
                                 System.Diagnostics.Debug.WriteLine($"读取D寄存器 {reg.Address} 失败");
-                                values[reg.Address] = 0;
+                                HandleConnectionFailure(
+                                    $"读取D寄存器 {addr} 失败: {result16.Message}",
+                                    expectedGeneration: connectionGeneration);
+                                return values;
                             }
                         }
                         else
                         {
-                            var result = await Task.Run(() => _plc.ReadInt32(addr, 1));
+                            var result = await RunPlcCallAsync(
+                                $"ReadInt32 {addr}", () => _plc.ReadInt32(addr, 1)).ConfigureAwait(false);
                             if (result.IsSuccess && result.Content.Length >= 1)
                                 values[reg.Address] = result.Content[0];
                             else
                             {
                                 System.Diagnostics.Debug.WriteLine($"读取D寄存器 {reg.Address} 失败");
-                                values[reg.Address] = 0;
+                                HandleConnectionFailure(
+                                    $"读取D寄存器 {addr} 失败: {result.Message}",
+                                    expectedGeneration: connectionGeneration);
+                                return values;
                             }
                         }
                     }
                     else if (addr.StartsWith("T", StringComparison.OrdinalIgnoreCase))
                     {
-                        var result = await Task.Run(() => _plc.ReadInt16(addr, 1));
+                        var result = await RunPlcCallAsync(
+                            $"ReadInt16 {addr}", () => _plc.ReadInt16(addr, 1)).ConfigureAwait(false);
                         if (result.IsSuccess && result.Content.Length >= 1)
                             values[reg.Address] = result.Content[0];
                         else
                         {
                             System.Diagnostics.Debug.WriteLine($"读取T寄存器 {reg.Address} 失败");
-                            values[reg.Address] = 0;
+                            HandleConnectionFailure(
+                                $"读取T寄存器 {addr} 失败: {result.Message}",
+                                expectedGeneration: connectionGeneration);
+                            return values;
                         }
                     }
                     else
                     {
-                        var result = await Task.Run(() => _plc.ReadInt16(reg.Address, 1));
+                        var result = await RunPlcCallAsync(
+                            $"ReadInt16 {reg.Address}", () => _plc.ReadInt16(reg.Address, 1)).ConfigureAwait(false);
                         if (result.IsSuccess && result.Content.Length >= 1)
                         {
                             values[reg.Address] = result.Content[0];
@@ -314,7 +631,10 @@ namespace MitsubishiMonitor.Demo.Services
                         else
                         {
                             System.Diagnostics.Debug.WriteLine($"读取寄存器 {reg.Address} 失败");
-                            values[reg.Address] = 0;
+                            HandleConnectionFailure(
+                                $"读取寄存器 {reg.Address} 失败: {result.Message}",
+                                expectedGeneration: connectionGeneration);
+                            return values;
                         }
                     }
                 }
@@ -322,6 +642,9 @@ namespace MitsubishiMonitor.Demo.Services
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取寄存器异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取寄存器异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return values;
@@ -329,9 +652,10 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<float> ReadTemperatureAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                 {
                     System.Diagnostics.Debug.WriteLine($"[温度读取] ⚠ 未连接，跳过读取");
                     return 0f;
@@ -340,7 +664,9 @@ namespace MitsubishiMonitor.Demo.Services
                 if (_config.TemperatureIsWord)
                 {
                     // 16位 Word 读取（设备3/4等单D寄存器存温度的设备）
-                    var result16 = await Task.Run(() => _plc.ReadInt16(_config.TemperatureAddress, 1));
+                    var result16 = await RunPlcCallAsync(
+                        $"ReadInt16 {_config.TemperatureAddress}",
+                        () => _plc.ReadInt16(_config.TemperatureAddress, 1)).ConfigureAwait(false);
                     if (result16.IsSuccess && result16.Content.Length >= 1)
                     {
                         short wordValue = result16.Content[0];
@@ -351,12 +677,17 @@ namespace MitsubishiMonitor.Demo.Services
                     else
                     {
                         System.Diagnostics.Debug.WriteLine($"[温度读取] ✗ 16位读取失败: {result16.Message} (错误码: {result16.ErrorCode})");
+                        HandleConnectionFailure(
+                            $"读取Word温度 {_config.TemperatureAddress} 失败: {result16.Message}",
+                            expectedGeneration: connectionGeneration);
                     }
                 }
                 else
                 {
                     // 32位 DINT 读取（默认，读取D地址及下一个D组成32位整数）
-                    var result = await Task.Run(() => _plc.ReadInt32(_config.TemperatureAddress, 1));
+                    var result = await RunPlcCallAsync(
+                        $"ReadInt32 {_config.TemperatureAddress}",
+                        () => _plc.ReadInt32(_config.TemperatureAddress, 1)).ConfigureAwait(false);
                     if (result.IsSuccess)
                     {
                         var values = result.Content;
@@ -372,12 +703,18 @@ namespace MitsubishiMonitor.Demo.Services
                     {
                         System.Diagnostics.Debug.WriteLine($"[温度读取] ✗ 失败: {result.Message} (错误码: {result.ErrorCode})");
                         System.Diagnostics.Debug.WriteLine($"[温度读取] 地址: {_config.TemperatureAddress}");
+                        HandleConnectionFailure(
+                            $"读取DINT温度 {_config.TemperatureAddress} 失败: {result.Message}",
+                            expectedGeneration: connectionGeneration);
                     }
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[温度读取] ✗ 异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取温度 {_config.TemperatureAddress} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return 0f;
@@ -385,13 +722,16 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<float> ReadThermocoupleAAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return 0f;
 
                 // 读取D17-D18作为DINT（32位有符号整数）
-                var result = await Task.Run(() => _plc.ReadInt32(_config.ThermocoupleAAddress, 1));
+                var result = await RunPlcCallAsync(
+                    $"ReadInt32 {_config.ThermocoupleAAddress}",
+                    () => _plc.ReadInt32(_config.ThermocoupleAAddress, 1)).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
@@ -404,10 +744,19 @@ namespace MitsubishiMonitor.Demo.Services
                         return voltage;
                     }
                 }
+                else
+                {
+                    HandleConnectionFailure(
+                        $"读取热电偶A {_config.ThermocoupleAAddress} 失败: {result.Message}",
+                        expectedGeneration: connectionGeneration);
+                }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取热电偶A异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取热电偶A {_config.ThermocoupleAAddress} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return 0f;
@@ -415,13 +764,16 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<float> ReadThermocoupleBAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return 0f;
 
                 // 读取D19-D20作为DINT（32位有符号整数）
-                var result = await Task.Run(() => _plc.ReadInt32(_config.ThermocoupleBAddress, 1));
+                var result = await RunPlcCallAsync(
+                    $"ReadInt32 {_config.ThermocoupleBAddress}",
+                    () => _plc.ReadInt32(_config.ThermocoupleBAddress, 1)).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
@@ -434,10 +786,19 @@ namespace MitsubishiMonitor.Demo.Services
                         return voltage;
                     }
                 }
+                else
+                {
+                    HandleConnectionFailure(
+                        $"读取热电偶B {_config.ThermocoupleBAddress} 失败: {result.Message}",
+                        expectedGeneration: connectionGeneration);
+                }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取热电偶B异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取热电偶B {_config.ThermocoupleBAddress} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return 0f;
@@ -445,13 +806,16 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<float> ReadThermocoupleCAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return 0f;
 
                 // 读取D21-D22作为DINT（32位有符号整数）
-                var result = await Task.Run(() => _plc.ReadInt32(_config.ThermocoupleCAddress, 1));
+                var result = await RunPlcCallAsync(
+                    $"ReadInt32 {_config.ThermocoupleCAddress}",
+                    () => _plc.ReadInt32(_config.ThermocoupleCAddress, 1)).ConfigureAwait(false);
 
                 if (result.IsSuccess)
                 {
@@ -464,10 +828,19 @@ namespace MitsubishiMonitor.Demo.Services
                         return voltage;
                     }
                 }
+                else
+                {
+                    HandleConnectionFailure(
+                        $"读取热电偶C {_config.ThermocoupleCAddress} 失败: {result.Message}",
+                        expectedGeneration: connectionGeneration);
+                }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取热电偶C异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取热电偶C {_config.ThermocoupleCAddress} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
 
             return 0f;
@@ -475,12 +848,14 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<PlcStatus> ReadAllAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
+            var failureVersion = Interlocked.Read(ref _ioFailureVersion);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return null;
 
-                // 并行读取所有数据
+                // 调用可并行创建，但底层由 _plcIoLock 串行访问同一条 TCP 连接。
                 var tasks = new List<Task>();
                 var xTask = ReadXPointsAsync(); tasks.Add(xTask);
                 var yTask = ReadYPointsAsync(); tasks.Add(yTask);
@@ -502,6 +877,10 @@ namespace MitsubishiMonitor.Demo.Services
                 }
 
                 await Task.WhenAll(tasks);
+
+                if (!IsConnectionCurrent(connectionGeneration) ||
+                    Interlocked.Read(ref _ioFailureVersion) != failureVersion)
+                    return null;
 
                 _status.X = await xTask;
                 _status.Y = await yTask;
@@ -533,7 +912,13 @@ namespace MitsubishiMonitor.Demo.Services
         public void StartAcquisition()
         {
             if (_isAcquiring)
+            {
+                // 自动重连后定时器仍然存在，但必须重新开始温度新鲜度计时，
+                // 否则旧 LastTemperatureSampleTime 会让下一次监控立即再次断线。
+                ResetTemperatureFreshness();
+                OnTempTimerElapsed(null, null);
                 return;
+            }
 
             if (!_isConnected)
             {
@@ -541,6 +926,7 @@ namespace MitsubishiMonitor.Demo.Services
             }
 
             _isAcquiring = true;
+            ResetTemperatureFreshness();
 
             // X/Y/M点快速采集定时器 (200ms)
             _xyTimer = new System.Timers.Timer(_config.XYInterval);
@@ -553,6 +939,9 @@ namespace MitsubishiMonitor.Demo.Services
             _tempTimer.Elapsed += OnTempTimerElapsed;
             _tempTimer.AutoReset = true;
             _tempTimer.Start();
+
+            // 连接成功后立即采一次温度，不必先等待完整的 TemperatureInterval。
+            OnTempTimerElapsed(null, null);
         }
 
         public void StopAcquisition()
@@ -578,9 +967,23 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 try
                 {
+                    var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
+                    var failureVersion = Interlocked.Read(ref _ioFailureVersion);
+                    if (!_isAcquiring || !IsConnectionCurrent(connectionGeneration))
+                        return;
+
                     var xValues = await ReadXPointsAsync();
                     var yValues = await ReadYPointsAsync();
                     var mValues = await ReadMPointsAsync();
+
+                    // 本轮任一读失败时数据不完整（失败的读返回全 false 数组），
+                    // 即使容错期内连接还保留，也必须跳过比较，否则会比出一堆假"IO变化"
+                    if (!IsConnectionCurrent(connectionGeneration) ||
+                        Interlocked.Read(ref _ioFailureVersion) != failureVersion)
+                        return;
+
+                    // 整轮 X/Y/M 全部读取成功，清零连续失败计数
+                    Interlocked.Exchange(ref _consecutiveIoFailures, 0);
 
                 // 更新当前状态
                 _status.X = xValues;
@@ -677,19 +1080,25 @@ namespace MitsubishiMonitor.Demo.Services
         private void OnTempTimerElapsed(object sender, ElapsedEventArgs e)
         {
             // 防止重入：上次温度读取未完成时跳过，避免 async void 异常吞噬风险
-            if (Interlocked.Exchange(ref _isReadingTemp, 1) == 1)
+            if (!_isAcquiring || Interlocked.Exchange(ref _isReadingTemp, 1) == 1)
                 return;
 
             Task.Run(async () =>
             {
             try
             {
+                var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
+                var failureVersion = Interlocked.Read(ref _ioFailureVersion);
+                if (!_isAcquiring || !IsConnectionCurrent(connectionGeneration))
+                    return;
+
                 var temperature = await ReadTemperatureAsync();
                 var targetTemp = await ReadTargetTemperatureAsync();
 
-                _status.Temperature = temperature;
-                _status.TargetTemperature = targetTemp;
-                _status.LastUpdateTime = DateTime.Now;
+                // 容错期内单次读失败不断线，但失败的读返回 0，本轮数据不可信，直接丢弃
+                if (!IsConnectionCurrent(connectionGeneration) ||
+                    Interlocked.Read(ref _ioFailureVersion) != failureVersion)
+                    return;
 
                 // 仅在有电压配置时读取热电偶数据
                 float thermoA = 0, thermoB = 0, thermoC = 0;
@@ -698,23 +1107,41 @@ namespace MitsubishiMonitor.Demo.Services
                     thermoA = await ReadThermocoupleAAsync();
                     thermoB = await ReadThermocoupleBAsync();
                     thermoC = await ReadThermocoupleCAsync();
-                    _status.ThermocoupleA = thermoA;
-                    _status.ThermocoupleB = thermoB;
-                    _status.ThermocoupleC = thermoC;
+                    if (!IsConnectionCurrent(connectionGeneration) ||
+                        Interlocked.Read(ref _ioFailureVersion) != failureVersion) return;
                 }
 
                 // 读取 C 寄存器
                 if (_config.HasCRegisters)
                 {
                     var cValues = await ReadCRegistersAsync();
+                    if (!IsConnectionCurrent(connectionGeneration) ||
+                        Interlocked.Read(ref _ioFailureVersion) != failureVersion) return;
                     _status.CValues = cValues;
                 }
 
-                bool isAlarm = targetTemp > 0 && temperature > targetTemp;
+                // 整轮温度采样链路全部成功，清零连续失败计数
+                Interlocked.Exchange(ref _consecutiveIoFailures, 0);
+
+                var sampleTime = DateTime.Now;
+                _status.Temperature = temperature;
+                _status.TargetTemperature = targetTemp;
+                _status.LastUpdateTime = sampleTime;
+                _status.LastTemperatureSampleTime = sampleTime;
+                if (_config.HasVoltage)
+                {
+                    _status.ThermocoupleA = thermoA;
+                    _status.ThermocoupleB = thermoB;
+                    _status.ThermocoupleC = thermoC;
+                }
+
+                // 报警阈值：使用 PlcConfig.TemperatureThreshold（设备详情页"温度报警阈值"输入框设置）
+                float threshold = _config.TemperatureThreshold > 0 ? _config.TemperatureThreshold : 90f;
+                bool isAlarm = temperature > threshold;
                 bool isSsrFault = false;
 
                 // SSR 故障检测仅在有电压数据时执行
-                if (_config.HasVoltage && targetTemp > 0)
+                if (_config.HasVoltage && threshold > 0)
                 {
                     float avgVoltage = (thermoA + thermoB + thermoC) / 3f;
                     bool hasVoltageOutput = avgVoltage > 0.1f;
@@ -727,7 +1154,7 @@ namespace MitsubishiMonitor.Demo.Services
                         if (_config.GetYAddress(yi) == "Y17") { pidIdx = yi; break; }
                     }
                     bool pidOutput = pidIdx >= 0 && pidIdx < _status.Y.Length && _status.Y[pidIdx];
-                    bool tempKeepRising = temperature > targetTemp + 5;
+                    bool tempKeepRising = temperature > threshold + 5;
 
                     if (hasVoltageOutput && !pidOutput && tempKeepRising)
                     {
@@ -764,7 +1191,7 @@ namespace MitsubishiMonitor.Demo.Services
                         ThermocoupleB = thermoB,
                         ThermocoupleC = thermoC,
                         IsAbnormal = isAlarm,
-                        SampleTime = DateTime.Now,
+                        SampleTime = sampleTime,
                         DeviceName = _config.Name
                     });
                 }
@@ -792,32 +1219,74 @@ namespace MitsubishiMonitor.Demo.Services
 
         private async Task<float> ReadTargetTemperatureAsync()
         {
+            var connectionGeneration = Interlocked.Read(ref _connectionGeneration);
             try
             {
-                if (!_isConnected)
+                if (!IsConnectionCurrent(connectionGeneration))
                     return 0f;
 
-                var result = await Task.Run(() => _plc.ReadInt32(_config.TargetTemperatureAddress, 1));
-
-                if (result.IsSuccess && result.Content.Length >= 1)
+                if (_config.TemperatureIsWord)
                 {
-                    int dintValue = result.Content[0];
-                    float targetTemp = dintValue / 10.0f;
-                    System.Diagnostics.Debug.WriteLine($"[目标温度] D210 DINT值={dintValue}, 目标温度={targetTemp:F1}°C");
-                    return targetTemp;
+                    // 16 位 Word 读取（与实际温度一致，如设备1的 D280）
+                    var result16 = await RunPlcCallAsync(
+                        $"ReadInt16 {_config.TargetTemperatureAddress}",
+                        () => _plc.ReadInt16(_config.TargetTemperatureAddress, 1)).ConfigureAwait(false);
+                    if (result16.IsSuccess && result16.Content.Length >= 1)
+                    {
+                        short wordValue = result16.Content[0];
+                        float targetTemp = wordValue / _config.TemperatureDivisor;
+                        System.Diagnostics.Debug.WriteLine($"[目标温度] {_config.TargetTemperatureAddress} Word值={wordValue}, 除数={_config.TemperatureDivisor}, 目标温度={targetTemp:F1}°C");
+                        return targetTemp;
+                    }
+                    else
+                    {
+                        HandleConnectionFailure(
+                            $"读取Word目标温度 {_config.TargetTemperatureAddress} 失败: {result16.Message}",
+                            expectedGeneration: connectionGeneration);
+                    }
+                }
+                else
+                {
+                    // 32 位 DINT 读取（默认，与实际温度一致）
+                    var result = await RunPlcCallAsync(
+                        $"ReadInt32 {_config.TargetTemperatureAddress}",
+                        () => _plc.ReadInt32(_config.TargetTemperatureAddress, 1)).ConfigureAwait(false);
+                    if (result.IsSuccess && result.Content.Length >= 1)
+                    {
+                        int dintValue = result.Content[0];
+                        float targetTemp = dintValue / _config.TemperatureDivisor;
+                        System.Diagnostics.Debug.WriteLine($"[目标温度] {_config.TargetTemperatureAddress} DINT值={dintValue}, 除数={_config.TemperatureDivisor}, 目标温度={targetTemp:F1}°C");
+                        return targetTemp;
+                    }
+                    else
+                    {
+                        HandleConnectionFailure(
+                            $"读取DINT目标温度 {_config.TargetTemperatureAddress} 失败: {result.Message}",
+                            expectedGeneration: connectionGeneration);
+                    }
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"读取目标温度异常: {ex.Message}");
+                HandleConnectionFailure(
+                    $"读取目标温度 {_config.TargetTemperatureAddress} 异常: {ex.Message}",
+                    expectedGeneration: connectionGeneration);
             }
             return 0f;
         }
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _isDisposed, 1) == 1)
+                return;
+
             StopAcquisition();
-            _plc?.ConnectClose();
+            var generation = SetDisconnectedState("服务已释放", notify: false);
+            _ = ScheduleConnectionClose(generation);
+
+            // 不释放 SemaphoreSlim：已触发但尚未退出的定时器任务可能仍在 Wait/Release。
+            // 它们是纯托管对象，随 MitsubishiPlcService 一起由 GC 回收即可。
         }
     }
 

@@ -391,7 +391,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 _logBuffer.EnqueueTemperatureLog(log);
 
                 // 更新温度历史 (用于曲线图)
-                App.Current.Dispatcher.BeginInvoke(() =>
+                await App.Current.Dispatcher.InvokeAsync(() =>
                 {
                     _temperatureHistory.Enqueue(temp);
                     if (_temperatureHistory.Count > 100)

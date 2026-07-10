@@ -20,14 +20,24 @@
     </UserControl.Resources>
     
     <Border x:Name="RootBorder"
-            Background="#0D1520"
-            BorderBrush="#1E2D3D"
             BorderThickness="1"
             CornerRadius="12"
             Padding="16"
             Height="220"
             Cursor="Hand"
             RenderTransformOrigin="0.5,0.5">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Setter Property="Background" Value="#0D1520"/>
+                <Setter Property="BorderBrush" Value="#1E2D3D"/>
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                        <Setter Property="Background" Value="#16202D"/>
+                        <Setter Property="BorderBrush" Value="#253545"/>
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
         <Border.Effect>
             <DropShadowEffect x:Name="CardShadow" Color="#000000" Opacity="0.3" BlurRadius="10" ShadowDepth="2"/>
         </Border.Effect>
@@ -57,10 +67,11 @@
 
             <!-- 卡片边框装饰 -->
             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
-                    HorizontalAlignment="Left" Width="60" VerticalAlignment="Top" Height="2"/>
+                    HorizontalAlignment="Left" Width="60" VerticalAlignment="Top" Height="2"
+                    Visibility="{Binding IsPlaceholder, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
 
             <!-- 卡片内容 -->
-            <Grid>
+            <Grid Visibility="{Binding IsPlaceholder, Converter={StaticResource InverseBoolToVisibilityConverter}}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
@@ -251,6 +262,14 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+            </Grid>
+
+            <!-- 占位符内容 -->
+            <Grid Visibility="{Binding IsPlaceholder, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                    <TextBlock Text="+" FontSize="40" Foreground="#1E2D3D" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                    <TextBlock Text="后 续 拓 展" FontSize="18" Foreground="#3A4A5A" HorizontalAlignment="Center" FontWeight="SemiBold"/>
+                </StackPanel>
             </Grid>
         </Grid>
     </Border>

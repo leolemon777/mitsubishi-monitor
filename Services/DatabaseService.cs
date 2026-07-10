@@ -15,17 +15,55 @@ namespace MitsubishiMonitor.Demo.Services
     /// </summary>
     public class DataService : IDataService, IDisposable
     {
+        /// <summary>
+        /// DB 是否已初始化（静态，进程生命周期内只执行一次 EnsureCreated + PRAGMA + schema 升级）
+        /// </summary>
+        private static volatile bool _initialized = false;
+        private static readonly object _initLock = new();
+        private static Task _initializeTask;
+
         public DataService()
         {
         }
 
+        /// <summary>
+        /// 初始化数据库：EnsureCreated + PRAGMA + 表结构升级。
+        /// 内部用静态锁保证全局只执行一次，外部可多次安全调用。
+        /// </summary>
         public async Task InitializeAsync()
+        {
+            if (_initialized) return;
+
+            Task initTask;
+            lock (_initLock)
+            {
+                if (_initialized) return;
+                _initializeTask ??= InitializeCoreAsync();
+                initTask = _initializeTask;
+            }
+
+            try
+            {
+                await initTask;
+            }
+            catch
+            {
+                lock (_initLock)
+                {
+                    if (ReferenceEquals(_initializeTask, initTask))
+                        _initializeTask = null;
+                    _initialized = false;
+                }
+                throw;
+            }
+        }
+
+        private static async Task InitializeCoreAsync()
         {
             using var ctx = new MonitorDbContext();
             await ctx.Database.EnsureCreatedAsync();
 
             // 启用 WAL 日志模式 + 适度同步级别，缓解 4 路 PLC 高频写入时的锁竞争
-            // （Microsoft.Data.Sqlite 的连接字符串不支持 Journal Mode 关键字，必须执行 PRAGMA）
             try
             {
                 await ctx.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
@@ -45,6 +83,9 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 System.Diagnostics.Debug.WriteLine($"[DB] 表结构升级失败: {ex.Message}");
             }
+
+            _initialized = true;
+            System.Diagnostics.Debug.WriteLine("[DB] InitializeAsync 完成（全局仅此一次）");
         }
 
         public async Task AddTemperatureLogAsync(TemperatureLog log)
@@ -118,7 +159,8 @@ namespace MitsubishiMonitor.Demo.Services
         {
             try
             {
-                var cutoffDate = DateTime.Now.AddDays(-15);
+                // 保留最近 30 天的数据（约 1 个月）
+                var cutoffDate = DateTime.Now.AddDays(-30);
 
                 using var ctx = new MonitorDbContext();
 

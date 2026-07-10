@@ -17,6 +17,11 @@ namespace MitsubishiMonitor.Demo
         public static string DatabasePath { get; private set; }
 
         /// <summary>
+        /// 自动导出 HTML 的目标文件夹路径，空表示不启用
+        /// </summary>
+        public static string AutoExportPath { get; private set; } = "";
+
+        /// <summary>
         /// 设备 IP 地址列表（索引 0=1号机，1=2号机，2=3号机，3=4号机）
         /// 从 config.json 的 DeviceIPs 读取，缺失时使用默认值
         /// </summary>
@@ -28,6 +33,12 @@ namespace MitsubishiMonitor.Demo
             "192.168.1.20"
         };
 
+        /// <summary>
+        /// 各设备温度报警阈值（索引 0=1号机，默认 90°C）
+        /// 对应设备详情页"温度报警阈值"输入框，持久化到 config.json
+        /// </summary>
+        public static float[] DeviceThresholds { get; private set; } = new float[] { 90f, 90f, 90f, 90f };
+
         static AppConfig()
         {
             Load();
@@ -36,8 +47,6 @@ namespace MitsubishiMonitor.Demo
         private static void Load()
         {
             SavedDatabasePath = "";
-
-            // 默认 IP（万一 config.json 里没有 DeviceIPs 字段）
             var defaultIPs = new[] { "192.168.1.5", "192.168.1.10", "192.168.1.15", "192.168.1.20" };
 
             try
@@ -55,18 +64,30 @@ namespace MitsubishiMonitor.Demo
                     if (doc.RootElement.TryGetProperty("DatabasePath", out var pathElement))
                         SavedDatabasePath = pathElement.GetString() ?? "";
 
+                    if (doc.RootElement.TryGetProperty("AutoExportPath", out var exportPathElement))
+                        AutoExportPath = exportPathElement.GetString() ?? "";
+
                     if (doc.RootElement.TryGetProperty("DeviceIPs", out var ipsElement)
                         && ipsElement.ValueKind == JsonValueKind.Array)
                     {
                         var ips = new List<string>();
                         foreach (var item in ipsElement.EnumerateArray())
                             ips.Add(item.GetString() ?? "");
-
-                        // 不足 4 个时用默认补齐
                         for (int i = ips.Count; i < 4; i++)
                             ips.Add(defaultIPs[i]);
-
                         DeviceIPs = ips.ToArray();
+                    }
+
+                    // 读取各设备报警阈值
+                    if (doc.RootElement.TryGetProperty("DeviceThresholds", out var threshEl)
+                        && threshEl.ValueKind == JsonValueKind.Array)
+                    {
+                        var thresholds = new List<float>();
+                        foreach (var item in threshEl.EnumerateArray())
+                            thresholds.Add(item.GetSingle());
+                        for (int i = thresholds.Count; i < 4; i++)
+                            thresholds.Add(90f);
+                        DeviceThresholds = thresholds.ToArray();
                     }
                 }
             }
@@ -81,22 +102,54 @@ namespace MitsubishiMonitor.Demo
 
             System.Diagnostics.Debug.WriteLine($"[配置] 数据库路径: {DatabasePath}");
             System.Diagnostics.Debug.WriteLine($"[配置] 设备IP: {string.Join(", ", DeviceIPs)}");
+            System.Diagnostics.Debug.WriteLine($"[配置] 报警阈值: {string.Join(", ", DeviceThresholds)}");
+        }
+
+        /// <summary>
+        /// 保存单个设备的报警阈值并持久化（deviceIndex 从 0 开始，对应设备 Id-1）
+        /// </summary>
+        public static void SaveDeviceThreshold(int deviceIndex, float threshold)
+        {
+            if (deviceIndex < 0 || deviceIndex >= 4) return;
+            DeviceThresholds[deviceIndex] = threshold;
+            WriteConfig();
+            System.Diagnostics.Debug.WriteLine($"[配置] 设备{deviceIndex + 1}报警阈值已保存: {threshold}°C");
         }
 
         public static void SaveDatabasePath(string path)
         {
+            SavedDatabasePath = path ?? "";
+            DatabasePath = string.IsNullOrWhiteSpace(SavedDatabasePath) ? DefaultDbPath : SavedDatabasePath;
+            WriteConfig();
+            System.Diagnostics.Debug.WriteLine($"[配置] 已保存数据库路径: {(string.IsNullOrEmpty(path) ? "(默认)" : path)}");
+        }
+
+        /// <summary>
+        /// 保存自动导出路径到 config.json
+        /// </summary>
+        public static void SaveAutoExportPath(string path)
+        {
+            AutoExportPath = path ?? "";
+            WriteConfig();
+            System.Diagnostics.Debug.WriteLine($"[配置] 已保存自动导出路径: {(string.IsNullOrEmpty(path) ? "(未启用)" : path)}");
+        }
+
+        /// <summary>
+        /// 统一写入 config.json（所有字段一次性写入，避免字段丢失）
+        /// </summary>
+        private static void WriteConfig()
+        {
             try
             {
-                // 重新写 config.json，保留 DeviceIPs
                 var config = new
                 {
-                    DatabasePath = path ?? "",
-                    DeviceIPs
+                    DatabasePath = SavedDatabasePath ?? "",
+                    AutoExportPath,
+                    DeviceIPs,
+                    DeviceThresholds
                 };
                 var json = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(ConfigFilePath, json);
-                SavedDatabasePath = path ?? "";
-                System.Diagnostics.Debug.WriteLine($"[配置] 已保存数据库路径: {(string.IsNullOrEmpty(path) ? "(默认)" : path)}");
             }
             catch (Exception ex)
             {
@@ -113,7 +166,9 @@ namespace MitsubishiMonitor.Demo
                     new
                     {
                         DatabasePath = "",
-                        DeviceIPs = new[] { "192.168.1.5", "192.168.1.10", "192.168.1.15", "192.168.1.20" }
+                        AutoExportPath = "",
+                        DeviceIPs = new[] { "192.168.1.5", "192.168.1.10", "192.168.1.15", "192.168.1.20" },
+                        DeviceThresholds = new float[] { 90f, 90f, 90f, 90f }
                     },
                     new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(ConfigFilePath, defaultContent);
