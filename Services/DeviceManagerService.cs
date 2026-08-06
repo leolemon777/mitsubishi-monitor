@@ -34,18 +34,30 @@ namespace MitsubishiMonitor.Demo.Services
         public Task UpdateStatusAsync()
         {
             var wasOnline = Device.IsOnline;
+            var status = PlcService.CurrentStatus;
 
-            if (PlcService.CurrentStatus.IsConnected)
+            if (status.IsConnected)
             {
                 Device.IsOnline = true;
-                Device.CurrentTemperature = PlcService.CurrentStatus.Temperature;
-                // 使用 PlcStatus.IsAlarm（由 MitsubishiPlcService 按设定温度计算，非硬编码）
-                Device.HasAlert = PlcService.CurrentStatus.IsAlarm;
-                Device.LastUpdateTime = DateTime.Now;
+                var hasCurrentSample = status.LastTemperatureSampleTime != default;
+                if (hasCurrentSample)
+                {
+                    Device.CurrentTemperature = status.Temperature;
+                    Device.HasTemperatureSample = true;
+                    // 温度卡片的更新时间只能来自真实温度采样，不能用手动刷新时间伪造。
+                    Device.LastUpdateTime = status.LastTemperatureSampleTime;
+                    Device.HasAlert = status.IsAlarm;
+                }
+
+                Device.IsTemperatureStale = !hasCurrentSample ||
+                    (PlcService is MitsubishiPlcService mitsubishi &&
+                     mitsubishi.IsTemperatureSampleDelayed(out _));
             }
             else
             {
                 Device.IsOnline = false;
+                if (Device.HasTemperatureSample)
+                    Device.IsTemperatureStale = true;
             }
 
             // 如果状态变化，触发通知
@@ -255,29 +267,33 @@ namespace MitsubishiMonitor.Demo.Services
             if (_stopped)
                 return Task.CompletedTask;
 
-            var snapshots = new List<(DevicePlcWrapper Wrapper, bool IsConnected, float Temperature)>();
+            var snapshots = new List<(DevicePlcWrapper Wrapper, bool IsConnected, float Temperature, bool IsTemperatureDelayed, DateTime LastTemperatureSampleTime)>();
             foreach (var wrapper in _wrappers.ToList())
             {
                 var status = wrapper.PlcService.CurrentStatus;
                 var isCurrentlyConnected = status.IsConnected;
-                if (isCurrentlyConnected
-                    && wrapper.PlcService is MitsubishiPlcService mitsubishi
-                    && mitsubishi.IsTemperatureSampleStale(DateTime.Now, out var tempAge))
+                var isTemperatureDelayed = false;
+                if (isCurrentlyConnected && wrapper.PlcService is MitsubishiPlcService mitsubishi)
                 {
-                    mitsubishi.MarkTemperatureSampleStale(tempAge);
-                    isCurrentlyConnected = false;
-                    Views.MainWindow.DbgLog("DeviceManagerService:TemperatureStale", "温度采样长时间未更新，触发自动重连", new
+                    isTemperatureDelayed = mitsubishi.IsTemperatureSampleDelayed(out _);
+                    if (mitsubishi.TryDisconnectIfTemperatureStale(out var tempAge))
                     {
-                        device = wrapper.Device.Name,
-                        wrapper.Device.IpAddress,
-                        ageSeconds = Math.Round(tempAge.TotalSeconds, 1),
-                        intervalMs = mitsubishi.Config.TemperatureInterval,
-                        lastTemperatureSampleTime = status.LastTemperatureSampleTime
-                    }, "TEMP");
+                        isCurrentlyConnected = false;
+                        isTemperatureDelayed = false;
+                        Views.MainWindow.DbgLog("DeviceManagerService:TemperatureStale", "温度采样长时间未更新，触发自动重连", new
+                        {
+                            device = wrapper.Device.Name,
+                            wrapper.Device.IpAddress,
+                            ageSeconds = Math.Round(tempAge.TotalSeconds, 1),
+                            intervalMs = mitsubishi.Config.TemperatureInterval,
+                            staleTimeoutMs = mitsubishi.Config.TemperatureStaleTimeout,
+                            lastTemperatureSampleTime = status.LastTemperatureSampleTime
+                        }, "TEMP");
+                    }
                 }
 
                 var temp = wrapper.PlcService.CurrentStatus.Temperature;
-                snapshots.Add((wrapper, isCurrentlyConnected, temp));
+                snapshots.Add((wrapper, isCurrentlyConnected, temp, isTemperatureDelayed, status.LastTemperatureSampleTime));
 
                 if (!isCurrentlyConnected)
                 {
@@ -301,31 +317,38 @@ namespace MitsubishiMonitor.Demo.Services
                             {
                                 var device = snapshot.Wrapper.Device;
                                 var wasOnline = device.IsOnline;
+                                var currentStatus = snapshot.Wrapper.PlcService.CurrentStatus;
 
-                                if (snapshot.IsConnected)
+                                if (currentStatus.IsConnected)
                                 {
-                                    // 只在温度真变化时才赋值（CommunityToolkit 的 SetProperty 内部已比较，
-                                    // 但显式比较可以省去 SetProperty 调用本身 + 让代码意图更清晰）。
-                                    // 注意必须在赋值前算好，赋值后再比较永远为 false。
-                                    var tempChanged = Math.Abs(device.CurrentTemperature - snapshot.Temperature) > 0.05f;
-                                    if (tempChanged)
-                                        device.CurrentTemperature = snapshot.Temperature;
+                                    // 重连刚建立但本代还没有采到温度时，不得把旧值重新包装成实时值。
+                                    var hasCurrentSample = currentStatus.LastTemperatureSampleTime != default;
+                                    var tempChanged = hasCurrentSample &&
+                                        Math.Abs(device.CurrentTemperature - currentStatus.Temperature) > 0.05f;
+                                    if (hasCurrentSample)
+                                    {
+                                        if (tempChanged)
+                                            device.CurrentTemperature = currentStatus.Temperature;
+                                        if (!device.HasTemperatureSample)
+                                            device.HasTemperatureSample = true;
+                                        if (device.LastUpdateTime != currentStatus.LastTemperatureSampleTime)
+                                            device.LastUpdateTime = currentStatus.LastTemperatureSampleTime;
+                                    }
                                     // 使用 PlcStatus.IsAlarm（已按设定温度判断，非硬编码 90°C）
                                     var hasAlert = snapshot.Wrapper.PlcService.CurrentStatus.IsAlarm;
                                     if (device.HasAlert != hasAlert)
                                         device.HasAlert = hasAlert;
                                     if (!device.IsOnline)
                                         device.IsOnline = true;
+                                    if (device.IsReconnecting)
+                                        device.IsReconnecting = false;
+                                    var isTemperatureDelayedNow = snapshot.Wrapper.PlcService is MitsubishiPlcService currentMitsubishi &&
+                                        currentMitsubishi.IsTemperatureSampleDelayed(out _);
+                                    var shouldShowStale = isTemperatureDelayedNow || !hasCurrentSample;
+                                    if (device.IsTemperatureStale != shouldShowStale)
+                                        device.IsTemperatureStale = shouldShowStale;
 
-                                    // LastUpdateTime 只在数据有变化（温度/在线翻转）或上次刷新已超 30s 时更新，
-                                    // 避免 5s 一次无脑写 DateTime.Now 触发不必要的 PropertyChanged + 模板字符串重算。
                                     var now = DateTime.Now;
-                                    if (!wasOnline ||
-                                        tempChanged ||
-                                        (now - device.LastUpdateTime).TotalSeconds > 30)
-                                    {
-                                        device.LastUpdateTime = now;
-                                    }
 
                                     if (!wasOnline)
                                     {
@@ -344,8 +367,12 @@ namespace MitsubishiMonitor.Demo.Services
                                     offlineList.Add(device);
                                     if (device.IsOnline)
                                         device.IsOnline = false;
-                                    if (device.HasTemperatureSample)
-                                        device.HasTemperatureSample = false;
+                                    // 保留最后一个有效温度供现场判断，但必须明确打上过期标记。
+                                    if (device.HasTemperatureSample && !device.IsTemperatureStale)
+                                        device.IsTemperatureStale = true;
+                                    var isReconnecting = _reconnectingIds.ContainsKey(device.Id);
+                                    if (device.IsReconnecting != isReconnecting)
+                                        device.IsReconnecting = isReconnecting;
 
                                     if (wasOnline)
                                     {
@@ -506,6 +533,7 @@ namespace MitsubishiMonitor.Demo.Services
             var w = wrapper;
             _ = Task.Run(async () =>
             {
+                var restored = false;
                 try
                 {
                     if (_stopped || !_autoReconnectIds.ContainsKey(id))
@@ -515,21 +543,9 @@ namespace MitsubishiMonitor.Demo.Services
                     var ok = await w.PlcService.ConnectAsync();
                     if (ok)
                     {
-                        // 用户可能在 ConnectAsync 等待期间点击了主动断开。
-                        // 此时不能让已在途的自动重连把设备重新连上。
-                        if (_stopped || !_autoReconnectIds.ContainsKey(id))
-                        {
-                            w.PlcService.Disconnect();
-                            return;
-                        }
-
-                        try { w.PlcService.StartAcquisition(); }
-                        catch (Exception sx)
-                        {
-                            System.Diagnostics.Debug.WriteLine($"[自动重连] {w.Device.Name} StartAcquisition 失败: {sx.Message}");
-                        }
-                        UpdateDeviceOnlineState(w, true);
-                        System.Diagnostics.Debug.WriteLine($"[自动重连] ✓ {w.Device.Name} 已恢复");
+                        restored = TryStartAcquisitionIfStillAuthorized(w, id, "自动重连");
+                        if (restored)
+                            System.Diagnostics.Debug.WriteLine($"[自动重连] ✓ {w.Device.Name} 已恢复");
                     }
                     else
                     {
@@ -544,8 +560,56 @@ namespace MitsubishiMonitor.Demo.Services
                 finally
                 {
                     _reconnectingIds.TryRemove(id, out _);
+                    UpdateDeviceOnlineState(w);
                 }
             });
+        }
+
+        private void OnPlcConnectionStateChanged(
+            DevicePlcWrapper wrapper,
+            bool isConnected)
+        {
+            UpdateDeviceOnlineState(wrapper);
+            if (!isConnected && !_stopped)
+                TryScheduleReconnect(wrapper);
+        }
+
+        private bool TryStartAcquisitionIfStillAuthorized(
+            DevicePlcWrapper wrapper,
+            int deviceId,
+            string source)
+        {
+            bool IsAuthorizedAndConnected()
+                => !_stopped &&
+                   _autoReconnectIds.ContainsKey(deviceId) &&
+                   wrapper.PlcService.CurrentStatus.IsConnected;
+
+            if (!IsAuthorizedAndConnected())
+            {
+                if (wrapper.PlcService.CurrentStatus.IsConnected)
+                    wrapper.PlcService.Disconnect();
+                return false;
+            }
+
+            try
+            {
+                wrapper.PlcService.StartAcquisition();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[{source}] {wrapper.Device.Name} StartAcquisition 失败: {ex.Message}");
+                wrapper.PlcService.Disconnect();
+                return false;
+            }
+
+            // StartAcquisition 与用户断开可能并发，启动后再次校验。
+            if (!IsAuthorizedAndConnected())
+            {
+                wrapper.PlcService.Disconnect();
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -760,6 +824,7 @@ namespace MitsubishiMonitor.Demo.Services
                     plcConfig.TemperatureThreshold = AppConfig.DeviceThresholds[deviceIndex];
 
                 var plcService = new MitsubishiPlcService(plcConfig);
+                var wrapper = new DevicePlcWrapper(device, plcService);
 
                 // 订阅该设备的IO点变化事件，写入数据库日志
                 int capturedId = device.Id;
@@ -768,8 +833,13 @@ namespace MitsubishiMonitor.Demo.Services
                 // 订阅温度采样事件，写入温度日志
                 plcService.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
 
+                // 通信层一旦判定掉线，立即把 UI 标为过期并进入受白名单保护的重连，
+                // 不必再等最长 5 秒的监控定时器。
+                plcService.ConnectionStateChanged += (s, isConnected) =>
+                    OnPlcConnectionStateChanged(wrapper, isConnected);
+
                 _devices.Add(device);
-                _wrappers.Add(new DevicePlcWrapper(device, plcService));
+                _wrappers.Add(wrapper);
             }
 
             // 建立 id → Device 字典，供线程池回调中安全查找
@@ -1134,9 +1204,9 @@ namespace MitsubishiMonitor.Demo.Services
             var success = await wrapper.PlcService.ConnectAsync();
             if (success)
             {
-                wrapper.PlcService.StartAcquisition();
-                UpdateDeviceOnlineState(wrapper, true);
+                success = TryStartAcquisitionIfStillAuthorized(wrapper, deviceId, "手动连接");
             }
+            UpdateDeviceOnlineState(wrapper);
             return success;
         }
 
@@ -1152,7 +1222,7 @@ namespace MitsubishiMonitor.Demo.Services
                 _autoReconnectIds.TryRemove(deviceId, out _);
                 wrapper.PlcService.StopAcquisition();
                 wrapper.PlcService.Disconnect();
-                UpdateDeviceOnlineState(wrapper, false);
+                UpdateDeviceOnlineState(wrapper);
             }
         }
 
@@ -1219,8 +1289,15 @@ namespace MitsubishiMonitor.Demo.Services
                     if (orderIndex > 0)
                         await Task.Delay(orderIndex * 250);
 
-                    wrapper.PlcService.StartAcquisition();
-                    UpdateDeviceOnlineState(wrapper, true);
+                    success = TryStartAcquisitionIfStillAuthorized(
+                        wrapper,
+                        wrapper.Device.Id,
+                        "批量连接");
+                }
+
+                if (success)
+                {
+                    UpdateDeviceOnlineState(wrapper);
                     sw.Stop();
                     Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接成功并启动采集", new
                     {
@@ -1277,7 +1354,7 @@ namespace MitsubishiMonitor.Demo.Services
                 {
                     wrapper.PlcService.StopAcquisition();
                     wrapper.PlcService.Disconnect();
-                    UpdateDeviceOnlineState(wrapper, false);
+                    UpdateDeviceOnlineState(wrapper);
                 }
                 catch (Exception ex)
                 {
@@ -1289,35 +1366,54 @@ namespace MitsubishiMonitor.Demo.Services
         /// <summary>
         /// 在 UI 线程上更新设备在线状态，连接/断开后立即刷新界面
         /// </summary>
-        private void UpdateDeviceOnlineState(DevicePlcWrapper wrapper, bool isOnline)
+        private void UpdateDeviceOnlineState(DevicePlcWrapper wrapper)
         {
             void Update()
             {
                 var device = wrapper.Device;
                 var wasOnline = device.IsOnline;
-                device.IsOnline = isOnline;
-                if (!isOnline)
-                    device.HasTemperatureSample = false;
-                device.LastUpdateTime = DateTime.Now;
-                if (wasOnline != isOnline)
+                // Dispatcher 真正执行时再读一次服务状态，不信任排队前的过期 true。
+                var actualOnline = wrapper.PlcService.CurrentStatus.IsConnected;
+                device.IsOnline = actualOnline;
+                device.IsReconnecting = !actualOnline && _reconnectingIds.ContainsKey(device.Id);
+
+                var sampleTime = wrapper.PlcService.CurrentStatus.LastTemperatureSampleTime;
+                if (sampleTime != default)
+                {
+                    device.CurrentTemperature = wrapper.PlcService.CurrentStatus.Temperature;
+                    device.HasTemperatureSample = true;
+                    device.LastUpdateTime = sampleTime;
+                    device.IsTemperatureStale = !actualOnline ||
+                        (wrapper.PlcService is MitsubishiPlcService mitsubishi &&
+                         mitsubishi.IsTemperatureSampleDelayed(out _));
+                }
+                else
+                {
+                    // 新一代连接尚无样本时，历史值不能被包装成实时值；离线时也保留
+                    // 最后有效值并明确标记过期。
+                    device.IsTemperatureStale = actualOnline || device.HasTemperatureSample;
+                }
+
+                if (wasOnline != actualOnline)
                 {
                     DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
                     {
                         Device = device,
                         WasOnline = wasOnline,
-                        IsOnline = isOnline,
+                        IsOnline = actualOnline,
                         ChangeTime = DateTime.Now
                     });
                 }
+
+                // 串口发送内部含短暂等待，放到后台且必须在 UI 状态落地后计算。
+                _ = UpdateTowerLightAsync();
             }
 
-            if (Application.Current?.Dispatcher.CheckAccess() == true)
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
                 Update();
             else
-                Application.Current?.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Update));
-
-            // 串口发送含 Thread.Sleep(100)，不阻塞 UI 线程
-            _ = UpdateTowerLightAsync();
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Update));
         }
 
         /// <summary>
@@ -1404,8 +1500,20 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 if (_stopped) return;
 
+                var wrapper = _wrappers.FirstOrDefault(w => w.Device.Id == deviceId);
+                var currentStatus = wrapper?.PlcService.CurrentStatus;
+                if (currentStatus == null ||
+                    currentStatus.LastTemperatureSampleTime != e.SampleTime)
+                {
+                    // Dispatcher 排队期间可能已经换代并收到更新样本，旧事件不得倒灌。
+                    return;
+                }
+
                 device.CurrentTemperature = e.Temperature;
                 device.HasTemperatureSample = true;
+                device.IsTemperatureStale = !currentStatus.IsConnected;
+                device.IsReconnecting = !currentStatus.IsConnected &&
+                    _reconnectingIds.ContainsKey(deviceId);
                 // IsAbnormal 由 MitsubishiPlcService 按设定温度判断，直接使用，无需硬编码 90°C
                 device.HasAlert = e.IsAbnormal;
                 device.LastUpdateTime = e.SampleTime;
@@ -1449,7 +1557,7 @@ namespace MitsubishiMonitor.Demo.Services
             _autoExport.UpdateExportPath(path);
         }
 
-        private bool _stopped;
+        private volatile bool _stopped;
 
         /// <summary>
         /// 停止监控（程序退出时调用）。多次调用安全。

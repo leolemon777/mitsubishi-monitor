@@ -4,6 +4,8 @@ VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MitsubishiMonitor.Demo", "MitsubishiMonitor.Demo.csproj", "{40C20A59-28AE-F549-6EBF-56C881800853}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MitsubishiMonitor.Demo.Tests", "Tests\MitsubishiMonitor.Demo.Tests\MitsubishiMonitor.Demo.Tests.csproj", "{91D14EC8-B526-49E1-B9A5-3C88132009B7}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{40C20A59-28AE-F549-6EBF-56C881800853}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{40C20A59-28AE-F549-6EBF-56C881800853}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{40C20A59-28AE-F549-6EBF-56C881800853}.Release|Any CPU.Build.0 = Release|Any CPU
+		{91D14EC8-B526-49E1-B9A5-3C88132009B7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{91D14EC8-B526-49E1-B9A5-3C88132009B7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{91D14EC8-B526-49E1-B9A5-3C88132009B7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{91D14EC8-B526-49E1-B9A5-3C88132009B7}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

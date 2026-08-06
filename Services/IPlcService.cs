@@ -50,7 +50,8 @@ namespace MitsubishiMonitor.Demo.Services
         Task<bool[]> ReadYPointsAsync();
 
         /// <summary>
-        /// 读取温度值 (浮点数)
+        /// 读取实际温度。读取失败时返回 <see cref="float.NaN"/>；
+        /// 0°C 和负温是合法采样，调用方不得将其当作失败值。
         /// </summary>
         Task<float> ReadTemperatureAsync();
 

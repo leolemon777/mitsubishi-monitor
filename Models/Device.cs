@@ -39,6 +39,7 @@ namespace MitsubishiMonitor.Demo.Models
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(StatusDisplay))]
         [NotifyPropertyChangedFor(nameof(StatusColor))]
+        [NotifyPropertyChangedFor(nameof(TemperatureDisplay))]
         private bool _isOnline;
 
         /// <summary>
@@ -55,6 +56,25 @@ namespace MitsubishiMonitor.Demo.Models
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(TemperatureDisplay))]
         private bool _hasTemperatureSample;
+
+        /// <summary>
+        /// 已超过一个正常刷新宽限窗口，但尚未达到强制断线阈值。
+        /// 旧值可以短暂保留用于观察，但必须明确标为滞后，不能伪装成实时值。
+        /// </summary>
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(TemperatureDisplay))]
+        [NotifyPropertyChangedFor(nameof(StatusDisplay))]
+        [NotifyPropertyChangedFor(nameof(StatusColor))]
+        private bool _isTemperatureStale;
+
+        /// <summary>
+        /// 后台正在为该设备建立新连接。
+        /// </summary>
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(StatusDisplay))]
+        [NotifyPropertyChangedFor(nameof(StatusColor))]
+        [NotifyPropertyChangedFor(nameof(TemperatureDisplay))]
+        private bool _isReconnecting;
 
         /// <summary>
         /// 是否有异常（温度超过阈值）
@@ -78,17 +98,29 @@ namespace MitsubishiMonitor.Demo.Models
         /// <summary>
         /// 温度显示文本
         /// </summary>
-        public string TemperatureDisplay => HasTemperatureSample ? $"{CurrentTemperature:F1}°C" : "--.-°C";
+        public string TemperatureDisplay => HasTemperatureSample
+            ? $"{CurrentTemperature:F1}°C{(IsTemperatureStale || IsReconnecting || !IsOnline ? " ⚠" : "")}"
+            : "--.-°C";
 
         /// <summary>
         /// 状态显示文本
         /// </summary>
-        public string StatusDisplay => IsOnline ? "在线" : "离线";
+        public string StatusDisplay => IsReconnecting
+            ? "重连中"
+            : IsOnline
+                ? (IsTemperatureStale ? "数据滞后" : "在线")
+                : "离线";
 
         /// <summary>
         /// 状态颜色
         /// </summary>
-        public string StatusColor => HasAlert ? "#F44336" : (IsOnline ? "#4CAF50" : "#757575");
+        public string StatusColor => IsReconnecting
+            ? "#F2C94C"
+            : !IsOnline
+                ? "#757575"
+                : IsTemperatureStale
+                    ? "#F2C94C"
+                    : HasAlert ? "#F44336" : "#4CAF50";
 
         /// <summary>
         /// 是否是占位卡片（后续拓展）

@@ -8,12 +8,18 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <InformationalVersion>1.1.0-communication-recovery.20260806</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- 开发时复制到输出目录方便调试；发布包不携带（CopyToPublishDirectory=Never），
          避免把开发机的配置覆盖现场配置。程序启动时若无 config.json 会自动生成默认配置。 -->
     <None Include="config.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <!-- 测试项目位于仓库子目录，主 WPF 项目不能把测试源文件重复编译进去。 -->
+    <Compile Remove="Tests\**\*.cs" />
   </ItemGroup>
 
   <ItemGroup>

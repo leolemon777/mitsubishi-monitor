@@ -170,6 +170,22 @@
                                         <Setter Property="Background" Value="#0D2D1A"/>
                                         <Setter Property="BorderBrush" Value="#00AA55"/>
                                     </DataTrigger>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding HasAlert}" Value="True"/>
+                                            <Condition Binding="{Binding IsOnline}" Value="True"/>
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Background" Value="#2D1A1A"/>
+                                        <Setter Property="BorderBrush" Value="#FF4444"/>
+                                    </MultiDataTrigger>
+                                    <DataTrigger Binding="{Binding IsTemperatureStale}" Value="True">
+                                        <Setter Property="Background" Value="#2D2610"/>
+                                        <Setter Property="BorderBrush" Value="#F2C94C"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsReconnecting}" Value="True">
+                                        <Setter Property="Background" Value="#2D2610"/>
+                                        <Setter Property="BorderBrush" Value="#F2C94C"/>
+                                    </DataTrigger>
                                 </Style.Triggers>
                             </Style>
                         </Border.Style>
@@ -177,10 +193,23 @@
                             <Ellipse Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,8,0">
                                 <Ellipse.Style>
                                     <Style TargetType="Ellipse">
-                                        <Setter Property="Fill" Value="#FF4444"/>
+                                        <Setter Property="Fill" Value="#757575"/>
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding IsOnline}" Value="True">
                                                 <Setter Property="Fill" Value="#00FF88"/>
+                                            </DataTrigger>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding HasAlert}" Value="True"/>
+                                                    <Condition Binding="{Binding IsOnline}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Fill" Value="#FF4444"/>
+                                            </MultiDataTrigger>
+                                            <DataTrigger Binding="{Binding IsTemperatureStale}" Value="True">
+                                                <Setter Property="Fill" Value="#F2C94C"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsReconnecting}" Value="True">
+                                                <Setter Property="Fill" Value="#F2C94C"/>
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
@@ -205,10 +234,18 @@
                         <TextBlock Text="{Binding TemperatureDisplay}" FontSize="36" FontWeight="Light" FontFamily="Consolas">
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock">
-                                    <Setter Property="Foreground" Value="#3A3A3A"/>
+                                    <Setter Property="Foreground" Value="#7F8C99"/>
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsOnline}" Value="True">
                                             <Setter Property="Foreground" Value="#FFAA00"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsTemperatureStale}" Value="True">
+                                            <Setter Property="Foreground" Value="#F2C94C"/>
+                                            <Setter Property="Opacity" Value="0.72"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsReconnecting}" Value="True">
+                                            <Setter Property="Foreground" Value="#F2C94C"/>
+                                            <Setter Property="Opacity" Value="0.82"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>

@@ -83,6 +83,28 @@ namespace MitsubishiMonitor.Demo.Models
         public int ConnectTimeout { get; set; } = 3000;
 
         /// <summary>
+        /// HslCommunication 接收超时（毫秒）。
+        /// </summary>
+        public int ReceiveTimeout { get; set; } = 2000;
+
+        /// <summary>
+        /// 应用层单条 PLC 指令硬截止时间（毫秒）。
+        /// 即使底层库没有按 ReceiveTimeout 返回，也必须在此时间后废弃整条连接会话。
+        /// </summary>
+        public int IoOperationTimeout { get; set; } = 5000;
+
+        /// <summary>
+        /// 等待同一连接内串行 I/O 锁的最长时间（毫秒）。
+        /// 超时说明前一条调用已经失去活性，需要废弃这一代连接。
+        /// </summary>
+        public int IoLockWaitTimeout { get; set; } = 10000;
+
+        /// <summary>
+        /// 温度样本最长允许停滞时间（毫秒）。默认 30 秒，即三个默认采样周期。
+        /// </summary>
+        public int TemperatureStaleTimeout { get; set; } = 30000;
+
+        /// <summary>
         /// X点起始地址 (A系列1E帧: X0, X1...)
         /// </summary>
         public string XStartAddress { get; set; } = "X0";

@@ -75,3 +75,31 @@ Verification:
 - `dotnet build -c Release --no-restore`: success, 0 errors.
 - Remaining warnings are pre-existing `NU1701` warnings for LiveCharts/LiveCharts.Wpf and `WFAC010` for manifest-based high-DPI configuration.
 - `git diff --check`: clean after correcting existing trailing whitespace findings.
+
+## 2026-08-06 Communication Freeze Recovery v1.1.0
+
+Field symptom: the real process temperature could reach about 50°C while the WPF card remained at an older 20–30°C value. The process had to be fully exited before temperature display recovered.
+
+Root cause: HslCommunication exposes synchronous PLC reads. A half-open TCP connection or wireless-bridge fault could leave one read blocked while holding the service-wide I/O path. The old close/reconnect flow then waited behind the same blocked path, while global polling flags could keep a replacement connection from starting its first automatic sample.
+
+Reliability changes:
+
+1. Each TCP connection generation now owns an independent transport and `SemaphoreSlim`. An application hard deadline abandons the exact generation; a new generation never waits for its old lock or client.
+2. `Abort()` closes the HSL communication pipe without waiting for the old I/O lock. `Abort` and `ConnectClose` are best-effort background cleanup; late operations receive a terminal second close so a late `ConnectServer` cannot leave a ghost socket.
+3. Every read and every commit validates the exact session generation. Each acquisition cycle also has a unique token, so an old XY/temperature/auxiliary task cannot block or clear the new cycle's single-flight state, including a same-connection Stop→Start.
+4. The primary actual-temperature register is committed and published immediately after it succeeds. Target temperature, thermocouple voltage, and C/T/D diagnostic registers run on a separate auxiliary lane. Ordinary auxiliary failures are logged but do not disconnect a healthy primary-temperature connection; a genuinely hung socket still triggers the global hard timeout.
+5. General, temperature, and auxiliary failure counters are separated per session. XY success cannot hide repeated temperature failure.
+6. Empty/invalid primary payloads return `NaN` and are never published as 0°C. Zero and negative temperatures remain valid samples.
+7. Temperature freshness uses a monotonic clock. New TCP sessions start with no current-generation sample, stale sessions are atomically invalidated, and connection-state events immediately mark the UI stale and start authorized reconnects.
+8. The UI retains the last valid value for diagnosis but displays an explicit warning and stale/offline color. Dispatcher-delayed old events must still match the service's current sample timestamp before they can update the card. `LastUpdateTime` is derived only from a real temperature sample.
+
+Verification:
+
+- 15 xUnit regression tests pass, including permanently blocked read, hard timeout replacement, blocked Abort/Close, delayed Connect ghost cleanup, automatic resampling after reconnect, late old-generation isolation, same-connection Stop→Start isolation, repeated auxiliary failure, Word/DINT empty payloads, lane-counter isolation, timer lifecycle, and UI freshness behavior.
+- The 14-test suite was also run five consecutive times before the final immediate-reconnect addition (70/70 passed).
+- Debug and Release builds pass with 0 errors.
+- Remaining warnings are the existing LiveCharts/LiveCharts.Wpf `NU1701` compatibility warning and `WFAC010` manifest high-DPI guidance.
+- Kimi Code, GLM through Claude Code, Grok CLI, and AGY CLI performed read-only reviews. Their final focused verdicts reported no P0/P1 code issue for the stale-temperature/restart symptom and recommended release.
+- No real FX3U PLC or wireless bridge was connected during this repair. Software proof is not field acceptance; use `docs/通信卡死修复与现场验收说明.md` for the read-only field check.
+
+This section supersedes the 2026-07-10 tradeoff that reconnect should wait behind the current bounded read. A permanently blocked third-party call cannot be made safe by waiting; v1.1.0 instead abandons the whole connection generation and isolates its resources.
