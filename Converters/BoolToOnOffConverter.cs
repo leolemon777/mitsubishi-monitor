@@ -17,7 +17,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -33,7 +33,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -55,7 +55,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -77,7 +77,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -104,7 +104,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -126,7 +126,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 
@@ -140,7 +140,7 @@ namespace MitsubishiMonitor.Demo.Converters
             if (value is int count) return count > 0 ? Visibility.Visible : Visibility.Collapsed;
             return Visibility.Collapsed;
         }
-        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => throw new NotImplementedException();
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) => Binding.DoNothing;
     }
 
     /// <summary>
@@ -166,7 +166,7 @@ namespace MitsubishiMonitor.Demo.Converters
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            throw new NotImplementedException();
+            return Binding.DoNothing;
         }
     }
 }

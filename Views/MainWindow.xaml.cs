@@ -1,9 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text.Json;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Input;
@@ -23,6 +23,12 @@ namespace MitsubishiMonitor.Demo.Views
         // 诊断：UI 线程卡死监控
         private System.Timers.Timer _heartbeatTimer;
         private static readonly object _dbgLogLock = new();
+        private static readonly ConcurrentQueue<string> _dbgLogQueue = new();
+        private static int _dbgLogWriterRunning;
+        private static int _dbgLogQueuedCount;
+        private static long _dbgLogDroppedCount;
+        private const int MaxDiagnosticQueueSize = 10000;
+        private const long MaxDiagnosticFileBytes = 32L * 1024 * 1024;
 
         [DllImport("kernel32.dll")]
         private static extern uint GetCurrentThreadId();
@@ -82,6 +88,7 @@ namespace MitsubishiMonitor.Demo.Views
                 try
                 {
                     System.IO.Directory.CreateDirectory(dir);
+                    CleanupOldDiagnosticLogs(dir);
                     var path = System.IO.Path.Combine(dir, fileName);
                     // 试写一次，确认目录有写权限（空字符串不会改文件内容）
                     System.IO.File.AppendAllText(path, "");
@@ -96,6 +103,30 @@ namespace MitsubishiMonitor.Demo.Views
 
         public static string DiagnosticLogPath => _dbgLog;
 
+        private static void CleanupOldDiagnosticLogs(string directory)
+        {
+            var cutoff = DateTime.UtcNow.AddDays(-30);
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(directory, "diagnostic-*.log*"))
+                {
+                    try
+                    {
+                        if (File.GetLastWriteTimeUtc(file) < cutoff)
+                            File.Delete(file);
+                    }
+                    catch
+                    {
+                        // 单个历史诊断文件被占用时跳过，不影响主程序启动。
+                    }
+                }
+            }
+            catch
+            {
+                // 诊断日志清理失败不影响监控启动。
+            }
+        }
+
         // UI 卡顿告警阈值（秒）：超过即捕获完整诊断快照
         private const double UiFreezeAlertSeconds = 5.0;
         // 同一次卡死内不重复记录的去抖窗口（秒）：避免一次卡死刷十几条相同记录
@@ -104,22 +135,112 @@ namespace MitsubishiMonitor.Demo.Views
 
         internal static void DbgLog(string location, string msg, object data, string hyp)
         {
-            // 在后台线程执行文件I/O，绝不阻塞UI线程
-            System.Threading.Tasks.Task.Run(() =>
+            try
             {
-                try
+                var entry = System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    var entry = System.Text.Json.JsonSerializer.Serialize(new
-                    {
-                        sessionId = "f8e8e9", runId = "run2", hypothesisId = hyp,
-                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        location, message = msg, data
-                    });
-                    lock (_dbgLogLock)
-                        File.AppendAllText(_dbgLog, entry + "\n");
+                    processId = Environment.ProcessId,
+                    hypothesisId = hyp,
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                    location,
+                    message = msg,
+                    data
+                });
+                _dbgLogQueue.Enqueue(entry);
+                var queued = Interlocked.Increment(ref _dbgLogQueuedCount);
+                while (queued > MaxDiagnosticQueueSize && _dbgLogQueue.TryDequeue(out _))
+                {
+                    queued = Interlocked.Decrement(ref _dbgLogQueuedCount);
+                    Interlocked.Increment(ref _dbgLogDroppedCount);
                 }
-                catch { }  // 文件写入失败静默忽略，不弹窗、不阻塞任何线程
-            });
+                StartDiagnosticWriter();
+            }
+            catch
+            {
+                Interlocked.Increment(ref _dbgLogDroppedCount);
+            }
+        }
+
+        private static void StartDiagnosticWriter()
+        {
+            if (Interlocked.Exchange(ref _dbgLogWriterRunning, 1) == 1)
+                return;
+
+            _ = System.Threading.Tasks.Task.Run(DrainDiagnosticLogQueue);
+        }
+
+        private static void DrainDiagnosticLogQueue()
+        {
+            try
+            {
+                while (!_dbgLogQueue.IsEmpty)
+                {
+                    var batch = new StringBuilder();
+                    var dropped = Interlocked.Exchange(ref _dbgLogDroppedCount, 0);
+                    if (dropped > 0)
+                    {
+                        batch.AppendLine(System.Text.Json.JsonSerializer.Serialize(new
+                        {
+                            processId = Environment.ProcessId,
+                            timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                            location = "DiagnosticLog",
+                            message = "诊断队列溢出或写入失败",
+                            dropped
+                        }));
+                    }
+
+                    var batchCount = 0;
+                    while (batchCount < 500 && _dbgLogQueue.TryDequeue(out var entry))
+                    {
+                        Interlocked.Decrement(ref _dbgLogQueuedCount);
+                        batch.AppendLine(entry);
+                        batchCount++;
+                    }
+
+                    if (batch.Length == 0)
+                        continue;
+
+                    try
+                    {
+                        lock (_dbgLogLock)
+                        {
+                            RotateDiagnosticLogIfNeeded();
+                            File.AppendAllText(_dbgLog, batch.ToString(), new UTF8Encoding(false));
+                        }
+                    }
+                    catch
+                    {
+                        Interlocked.Add(ref _dbgLogDroppedCount, Math.Max(1, batchCount));
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _dbgLogWriterRunning, 0);
+                if (!_dbgLogQueue.IsEmpty)
+                    StartDiagnosticWriter();
+            }
+        }
+
+        private static void RotateDiagnosticLogIfNeeded()
+        {
+            if (!File.Exists(_dbgLog) || new FileInfo(_dbgLog).Length < MaxDiagnosticFileBytes)
+                return;
+
+            File.Move(_dbgLog, _dbgLog + ".1", overwrite: true);
+        }
+
+        private static void FlushDiagnosticLogQueue()
+        {
+            var deadline = Environment.TickCount64 + 2000;
+            while (!_dbgLogQueue.IsEmpty || Volatile.Read(ref _dbgLogWriterRunning) != 0)
+            {
+                StartDiagnosticWriter();
+                if (Environment.TickCount64 >= deadline)
+                    break;
+                Thread.Sleep(20);
+            }
         }
 
         /// <summary>
@@ -406,6 +527,7 @@ namespace MitsubishiMonitor.Demo.Views
             {
                 System.Diagnostics.Debug.WriteLine($"[MainWindow] 关闭清理异常: {ex.Message}");
             }
+            FlushDiagnosticLogQueue();
 
             base.OnClosed(e);
         }

@@ -1,5 +1,7 @@
 # Implementation Notes
 
+> Historical record: the LiveCharts 0.9.7, EPPlus, WinForms DPI, and legacy ViewModel warnings mentioned below were resolved in the 2026-08-29 adversarial remediation. Keep the dated entries as history rather than current build status.
+
 ## 2026-06-10 Temperature Display Drift
 
 Problem: Operators reported that after the upper computer has been connected for an unknown period, the displayed temperature no longer matches the actual PLC/HMI temperature. Disconnecting and reconnecting makes it normal again.
@@ -103,3 +105,39 @@ Verification:
 - No real FX3U PLC or wireless bridge was connected during this repair. Software proof is not field acceptance; use `docs/通信卡死修复与现场验收说明.md` for the read-only field check.
 
 This section supersedes the 2026-07-10 tradeoff that reconnect should wait behind the current bounded read. A permanently blocked third-party call cannot be made safe by waiting; v1.1.0 instead abandons the whole connection generation and isolates its resources.
+
+## 2026-08-30 Communication Stability Closure v1.2.0
+
+This round executed the remaining adversarial-review plan against the dirty working tree and preserved the pre-existing user changes.
+
+1. **Connection truth is explicit** — `PlcConnectionPhase` now distinguishes TCP connect, MC read-only protocol verification, first-sample wait, fresh/stale data, communication fault, backoff, stopping and disposal. The manager ignores stale-generation connection events, so a late old-session callback cannot schedule a new connection over a healthy session.
+2. **Reconnect is bounded** — each device has an exponential backoff (5–60 seconds, ±20% jitter), a schedule version, a user reconnect whitelist and a process-wide reconnect gate. Cancellation and lifecycle shutdown invalidate pending schedules; a delayed task cannot return from `finally` or overwrite a newer schedule.
+3. **Polling is single-flight and prioritized** — each device owns one scheduler with separate temperature, XY and auxiliary lanes. Temperature has priority; delayed temperature samples stretch XY cadence. A real temperature lane token prevents an old Stop→Start loop from overlapping a new temperature read. A process-wide semaphore caps synchronous Hsl/native calls, and a six-task detached-call breaker stops retry storms.
+4. **Temperature values are evidence-backed** — actual and target registers have independent address/type/scale/range definitions. Empty or malformed payloads, non-finite/out-of-range values and excessive steps are rejected. Valid samples carry raw value, connection generation, monotonic sequence and quality. UI only shows a numeric value when the current generation is fresh; the last valid value and age are shown separately.
+5. **Malformed I/O cannot shrink state** — X/Y/M payload lengths are checked before applying arrays or comparing point changes. The first valid I/O frame establishes a baseline and produces no synthetic operation events. Null array assignments are normalized in `PlcStatus`.
+6. **UI/serial pressure is isolated** — TC60 Open/Write/Read/Sleep work runs on a background state pump with latest-state coalescing and retry. Device/detail scanline effects are static; chart animations remain disabled. Diagnostic writes are queued, rotated and aggregated for repeated slow/failing PLC calls; connection phases and temperature rejections are persisted to the same diagnostic stream.
+
+Verification for this closure: `dotnet build` Debug and Release both pass with zero warnings/errors; xUnit passes 40/40 in both configurations; `git diff --check` is clean; package vulnerability/deprecation audits report none. A new self-contained single-file package is in `publish/MitsubishiMonitor-1.2.0-communication-stability-20260830/` and does not contain the developer `config.json`. Real FX3U, wireless bridge and USB tower-light acceptance remains a separate read-only field gate.
+
+## 2026-08-30 Mixed-Power Device Policy v1.2.1
+
+Field clarification: the four PLC-backed machines are independently and unpredictably powered. Any combination from all-off to one, several or all machines running is normal. Treating every configured PLC as continuously required online caused expected power-off states to look like communication failures and kept the reconnect/tower-light policy unnecessarily active.
+
+Changes:
+
+1. Added a persisted per-device `DeviceMonitoringMode`: `AutoStandby` (default), `RequiredOnline` and `Disabled`. Legacy configurations without the field are normalized to four `AutoStandby` entries.
+2. `AutoStandby` uses low-frequency 30–60 second discovery and never turns a powered-off machine into `CommunicationFault` or an offline-banner entry. `RequiredOnline` retains the faster 5–60 second recovery and failure semantics. `Disabled` cancels pending reconnect generations and stops the service.
+3. Added explicit `Standby` and `Disabled` UI states. Powered-off machines cannot display a historical temperature as current; their card remains `--.-°C` while retaining the separately labelled last valid value.
+4. Tower-light input is now mode-aware. Offline auto-standby and disabled machines are excluded; an online auto-standby machine participates in freshness/alarm checks; required-online machines always participate.
+5. Startup and the global button sequentially probe enabled machines. Expected auto-standby misses are reported as standby, not failed connections. The card's stop action is now a persisted disable; enabling a disabled card restores the safe default auto-standby mode.
+6. Settings can atomically save all four modes alongside storage settings and apply them to the current manager. Runtime-apply failure is reported separately from successful durable configuration save.
+
+Verification: Debug and Release builds pass with zero warnings/errors; xUnit passes 45/45 in both configurations, including one-on/three-off, all-off, required-offline, online-stale, alarm, policy-delay, legacy-config migration and invalid-mode cases. No live PLC, bridge or tower light was used; the mixed-power field matrix remains read-only acceptance work.
+
+## 2026-08-30 Post-Review Reconnect Cadence Fix
+
+Adversarial review found that the v1.2.1 reconnect backoff was applied twice after a failed attempt: the scheduler gate waited `delay(N+1)` before the next task could be scheduled, and that task then slept the same `delay(N+1)` again before calling `ConnectAsync`. The steady-state spacing between actual connect attempts was therefore about 120 seconds instead of the documented 30–60 seconds, so a powered-on auto-standby machine could wait roughly two minutes to be discovered in the worst case.
+
+Fix: `ApplyReconnectOutcome` now opens the scheduler gate immediately after a failure. Backoff is applied exactly once, inside the next scheduled task's delay. First-retry semantics are unchanged (5 seconds for required-online, 30 seconds for auto-standby after a drop is detected), and steady-state intervals now equal the `DeviceMonitoringPolicy` delay plus at most one 5-second monitor tick. A regression test asserts that the gate opens immediately after failure, so the double application cannot be reintroduced silently.
+
+Verification: Debug and Release builds pass with zero warnings; xUnit passes 46/46 in both configurations; `git diff --check` is clean.

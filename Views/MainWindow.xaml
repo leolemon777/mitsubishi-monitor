@@ -45,12 +45,6 @@
                            From="1" To="0.5" Duration="0:0:1" AutoReverse="True"/>
         </Storyboard>
 
-        <!-- 扫描线动画 -->
-        <Storyboard x:Key="ScanLineAnimation" RepeatBehavior="Forever">
-            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                           From="0" To="200" Duration="0:0:2" AutoReverse="False"/>
-        </Storyboard>
-
         <!-- 呼吸灯动画 -->
         <Storyboard x:Key="BreathAnimation" RepeatBehavior="Forever">
             <DoubleAnimation Storyboard.TargetProperty="Opacity"
@@ -231,6 +225,12 @@
                         <TextBlock x:Name="CurrentTimeText" FontSize="13" FontWeight="SemiBold" Foreground="#00D4FF" FontFamily="Consolas" VerticalAlignment="Center" Margin="12,0,0,0"/>
                     </StackPanel>
                 </Border>
+                <Border Margin="12,0,0,0" Padding="12,5" CornerRadius="4"
+                        Background="#5A2A00" BorderBrush="#FFAB00" BorderThickness="1"
+                        Visibility="{Binding DemoModeVisibility}">
+                    <TextBlock Text="视频演示模式 · 虚拟数据 · 未连接 PLC"
+                               Foreground="#FFD166" FontWeight="Bold" FontSize="12"/>
+                </Border>
             </StackPanel>
 
             <!-- 窗口控制按钮 -->
@@ -408,6 +408,48 @@
                             <TextBlock Text="{Binding ConnectionStatusText, Mode=OneWay}"
                                        FontSize="12" Foreground="#B0BAC4" FontFamily="Microsoft YaHei UI"/>
                         </Border>
+                        <Border Padding="12,5" Margin="8,0,0,0" CornerRadius="4" BorderThickness="1">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="#2A0A0A"/>
+                                    <Setter Property="BorderBrush" Value="#FF4444"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding DeviceManager.IsDatabaseHealthy}" Value="True">
+                                            <Setter Property="Background" Value="#0D2D1A"/>
+                                            <Setter Property="BorderBrush" Value="#00AA55"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock FontSize="11" Foreground="#E8EAED" ToolTip="{Binding DeviceManager.DatabaseHealthText}">
+                                <Run Text="DB: "/>
+                                <Run Text="{Binding DeviceManager.DatabaseHealthText, Mode=OneWay}"/>
+                                <Run Text=" · 待写 "/>
+                                <Run Text="{Binding DeviceManager.PendingDatabaseLogCount, Mode=OneWay}"/>
+                                <Run Text=" · 磁盘缓冲 "/>
+                                <Run Text="{Binding DeviceManager.SpooledDatabaseLogCount, Mode=OneWay}"/>
+                            </TextBlock>
+                        </Border>
+                        <Border Padding="12,5" Margin="8,0,0,0" CornerRadius="4" BorderThickness="1">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Background" Value="#2A0A0A"/>
+                                    <Setter Property="BorderBrush" Value="#FF4444"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding DeviceManager.IsAutoExportHealthy}" Value="True">
+                                            <Setter Property="Background" Value="#0D2D1A"/>
+                                            <Setter Property="BorderBrush" Value="#00AA55"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <TextBlock FontSize="11" Foreground="#E8EAED" ToolTip="{Binding DeviceManager.AutoExportHealthText}">
+                                <Run Text="导出: "/>
+                                <Run Text="{Binding DeviceManager.AutoExportHealthText, Mode=OneWay}"/>
+                                <Run Text=" · 待写 "/>
+                                <Run Text="{Binding DeviceManager.PendingAutoExportLogCount, Mode=OneWay}"/>
+                            </TextBlock>
+                        </Border>
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
@@ -426,7 +468,7 @@
                                             Background="{TemplateBinding Background}">
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                                             <TextBlock Text="🔕" FontSize="14" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                                            <TextBlock x:Name="AlarmResetText" Text="三色灯复位" FontSize="13" FontWeight="SemiBold"
+                                            <TextBlock x:Name="AlarmResetText" Text="报警确认 / 消音" FontSize="13" FontWeight="SemiBold"
                                                        Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
                                         </StackPanel>
                                     </Border>
@@ -452,7 +494,7 @@
                             </Button.Template>
                         </Button>
 
-                        <Button Content="⚡ 连接全部设备" Command="{Binding ConnectAllDevicesCommand}"
+                        <Button Content="⚡ 探测全部设备" Command="{Binding ConnectAllDevicesCommand}"
                                 Style="{StaticResource TechButtonStyle}" FontSize="13">
                             <Button.Effect>
                                 <DropShadowEffect Color="#00D4FF" Opacity="0.3" BlurRadius="12" ShadowDepth="0"/>

@@ -1,7 +1,7 @@
 <Window x:Class="MitsubishiMonitor.Demo.Views.DeviceDetailWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:lvc="clr-namespace:LiveCharts.Wpf;assembly=LiveCharts.Wpf"
+        xmlns:lvc="clr-namespace:LiveChartsCore.SkiaSharpView.WPF;assembly=LiveChartsCore.SkiaSharpView.WPF"
         xmlns:controls="clr-namespace:MitsubishiMonitor.Demo.Controls"
         Title="设备详情"
         WindowState="Maximized"
@@ -138,7 +138,7 @@
             </Style.Triggers>
         </Style>
 
-        <!-- 统计卡片样式 - 带扫描线效果 -->
+        <!-- 统计卡片样式：静态装饰，避免常驻动画时钟占用 UI 线程。 -->
         <Style x:Key="StatCardStyle" TargetType="Border" BasedOn="{StaticResource CardStyle}">
             <!-- 使用最小高度，避免内容被裁剪，同时保持三张卡片整体高度一致 -->
             <Setter Property="MinHeight" Value="170"/>
@@ -259,7 +259,7 @@
         </Grid>
 
         <!-- 主内容 -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+        <ScrollViewer x:Name="DetailScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <Grid Margin="20">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -281,22 +281,7 @@
                     <Border Grid.Column="0" Style="{StaticResource StatCardStyle}" Margin="0,0,8,0" ClipToBounds="True">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource TechGradient}" Opacity="0.25"
-                                    RenderTransformOrigin="0.5,0">
-                                <Border.RenderTransform>
-                                    <TranslateTransform Y="0"/>
-                                </Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="140" Duration="0:0:3"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource TechGradient}" Opacity="0.25"/>
                             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
                             
@@ -319,6 +304,10 @@
                                 <Border Background="#161B22" CornerRadius="4" Padding="6,3" Margin="0,6,0,0" BorderBrush="#30363D" BorderThickness="1" HorizontalAlignment="Left">
                                     <TextBlock Text="{Binding CurrentDevice.LastUpdateTime, StringFormat=更新: HH:mm:ss}" FontSize="12" Foreground="#8B949E" FontFamily="Consolas"/>
                                 </Border>
+                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                    <TextBlock Text="{Binding CurrentDevice.LastValidTemperatureDisplay}" FontSize="11" Foreground="#8B949E" FontFamily="Consolas" Margin="0,0,10,0"/>
+                                    <TextBlock Text="{Binding CurrentDevice.TemperatureFreshnessDisplay}" FontSize="11" Foreground="#8B949E" FontFamily="Consolas"/>
+                                </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                                     <Border Background="#161B22" CornerRadius="4" Padding="6,3" Margin="0,0,8,0" BorderBrush="#30363D" BorderThickness="1">
                                         <TextBlock Text="{Binding TargetTemperatureDisplay, StringFormat=目标: {0}}" FontSize="12" Foreground="#8B949E" FontFamily="Consolas"/>
@@ -328,7 +317,7 @@
                                         Background="#FF4444" CornerRadius="4" Padding="8,4" Margin="0,8,0,0" HorizontalAlignment="Left">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="⚠️ 温度报警" FontSize="12" FontWeight="Bold" Foreground="White" Margin="0,0,8,0"/>
-                                        <Button Content="🔄 复位" Command="{Binding AcknowledgeAlarmCommand}" 
+                                        <Button Content="🔇 确认 / 消音" Command="{Binding AcknowledgeAlarmCommand}"
                                                 Background="White" Foreground="#FF4444" BorderThickness="0" 
                                                 Padding="8,2" Cursor="Hand" FontSize="11" FontWeight="Bold"/>
                                     </StackPanel>
@@ -347,22 +336,7 @@
                             ToolTip="点击查看操作日志">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource TechGradient}" Opacity="0.25"
-                                    RenderTransformOrigin="0.5,0">
-                                <Border.RenderTransform>
-                                    <TranslateTransform Y="0"/>
-                                </Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="140" Duration="0:0:3"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource TechGradient}" Opacity="0.25"/>
                             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
 
@@ -380,22 +354,7 @@
                     <Border Grid.Column="2" Style="{StaticResource StatCardStyle}" ClipToBounds="True">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource AlertGradient}" Opacity="0.25"
-                                    RenderTransformOrigin="0.5,0">
-                                <Border.RenderTransform>
-                                    <TranslateTransform Y="0"/>
-                                </Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="140" Duration="0:0:3"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource AlertGradient}" Opacity="0.25"/>
                             <Border BorderBrush="{StaticResource AlertGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
                             
@@ -438,24 +397,9 @@
                 <!-- 工具栏 -->
                 <Border Grid.Row="1" Style="{StaticResource CardStyle}" Margin="0,0,0,16" ClipToBounds="True">
                     <Grid>
-                        <!-- 扫描线效果 -->
+                        <!-- 静态顶部装饰线：避免详情页常驻无限循环动画时钟。 -->
                         <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                Background="{StaticResource TechGradient}" Opacity="0.2"
-                                RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
-                            <Border.RenderTransform>
-                                <TranslateTransform Y="0"/>
-                            </Border.RenderTransform>
-                            <Border.Triggers>
-                                <EventTrigger RoutedEvent="Border.Loaded">
-                                    <BeginStoryboard>
-                                        <Storyboard RepeatBehavior="Forever">
-                                            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                           From="0" To="60" Duration="0:0:3"/>
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </EventTrigger>
-                            </Border.Triggers>
-                        </Border>
+                                Background="{StaticResource TechGradient}" Opacity="0.2" Panel.ZIndex="1"/>
                         <Grid Margin="0,2,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -529,20 +473,7 @@
                     <Border Style="{StaticResource CardStyle}" ClipToBounds="True">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource TechGradient}" Opacity="0.3"
-                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
-                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="500" Duration="0:0:4"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource TechGradient}" Opacity="0.3" Panel.ZIndex="1"/>
                             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
                             <StackPanel>
@@ -579,15 +510,13 @@
                                 </Grid>
 
                                 <!-- 图表 (双Y轴) -->
-                                <lvc:CartesianChart x:Name="CombinedChart" LegendLocation="Top" Height="320" DisableAnimations="True">
-                                    <lvc:CartesianChart.AxisX>
-                                        <lvc:Axis x:Name="XAxis" Title="时间" FontSize="12"/>
-                                    </lvc:CartesianChart.AxisX>
-                                    <lvc:CartesianChart.AxisY>
-                                        <lvc:Axis x:Name="YAxisLeft" Title="温度(°C)" FontSize="12" Foreground="#F0883E"/>
-                                        <lvc:Axis x:Name="YAxisRight" Title="电压(V)" Position="RightTop" FontSize="12" Foreground="#58A6FF"/>
-                                    </lvc:CartesianChart.AxisY>
-                                </lvc:CartesianChart>
+                                <lvc:CartesianChart x:Name="CombinedChart"
+                                                    Series="{Binding CombinedSeries}"
+                                                    XAxes="{Binding XAxes}"
+                                                    YAxes="{Binding CombinedYAxes}"
+                                                    LegendPosition="Top"
+                                                    AnimationsSpeed="0:0:0"
+                                                    Height="320"/>
 
                                 <!-- 加热诊断信息 -->
                                 <Border Background="#0D1520" CornerRadius="6" Padding="12,8" Margin="0,8,0,0" BorderBrush="#1E2D3D" BorderThickness="1">
@@ -620,34 +549,20 @@
                     <Border Grid.Column="0" Style="{StaticResource CardStyle}" Margin="0,0,8,0" ClipToBounds="True">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource TechGradient}" Opacity="0.3"
-                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
-                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="500" Duration="0:0:4"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource TechGradient}" Opacity="0.3" Panel.ZIndex="1"/>
                             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
                             <StackPanel>
                                 <TextBlock Style="{StaticResource SectionTitle}" Foreground="#F0883E" Margin="0,0,0,8">
                                     <Run Text="🌡️ 反应槽温度（"/><Run Text="{Binding PlcConfig.TemperatureAddress, Mode=OneWay}"/><Run Text="）"/>
                                 </TextBlock>
-                                <lvc:CartesianChart x:Name="TempOnlyChart" LegendLocation="None" Height="320" DisableAnimations="True">
-                                    <lvc:CartesianChart.AxisX>
-                                        <lvc:Axis x:Name="XAxisNoVoltage" Title="时间" FontSize="12"/>
-                                    </lvc:CartesianChart.AxisX>
-                                    <lvc:CartesianChart.AxisY>
-                                        <lvc:Axis Title="温度(°C)" FontSize="12" Foreground="#F0883E"/>
-                                    </lvc:CartesianChart.AxisY>
-                                </lvc:CartesianChart>
+                                <lvc:CartesianChart x:Name="TempOnlyChart"
+                                                    Series="{Binding CombinedSeries}"
+                                                    XAxes="{Binding XAxes}"
+                                                    YAxes="{Binding TemperatureYAxes}"
+                                                    LegendPosition="Hidden"
+                                                    AnimationsSpeed="0:0:0"
+                                                    Height="320"/>
                             </StackPanel>
                         </Grid>
                     </Border>
@@ -656,20 +571,7 @@
                     <Border Grid.Column="1" Style="{StaticResource CardStyle}" ClipToBounds="True">
                         <Grid>
                             <Border Height="2" VerticalAlignment="Top" HorizontalAlignment="Stretch"
-                                    Background="{StaticResource SuccessGradient}" Opacity="0.3"
-                                    RenderTransformOrigin="0.5,0" Panel.ZIndex="1">
-                                <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
-                                <Border.Triggers>
-                                    <EventTrigger RoutedEvent="Border.Loaded">
-                                        <BeginStoryboard>
-                                            <Storyboard RepeatBehavior="Forever">
-                                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                                               From="0" To="600" Duration="0:0:4"/>
-                                            </Storyboard>
-                                        </BeginStoryboard>
-                                    </EventTrigger>
-                                </Border.Triggers>
-                            </Border>
+                                    Background="{StaticResource SuccessGradient}" Opacity="0.3" Panel.ZIndex="1"/>
                             <Border BorderBrush="{StaticResource SuccessGradient}" BorderThickness="0,0,0,2"
                                     HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="2" Margin="20,0,20,0"/>
                             <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -850,7 +752,7 @@
                 </Border>
 
                 <!-- PLC 点位状态面板 -->
-                <Border Grid.Row="5" Style="{StaticResource CardStyle}" Margin="0,16,0,0" ClipToBounds="True">
+                <Border x:Name="PlcPointPanelHost" Grid.Row="5" Style="{StaticResource CardStyle}" Margin="0,16,0,0" ClipToBounds="True">
                     <controls:PlcPointPanel PlcStatus="{Binding PlcStatus}"
                                             PlcConfig="{Binding PlcConfig}"
                                             Height="450"/>

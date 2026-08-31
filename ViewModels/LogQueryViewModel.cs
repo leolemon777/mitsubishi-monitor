@@ -44,6 +44,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
         /// 老的查询返回时直接丢弃结果，避免快速切换导致结果错乱。
         /// </summary>
         private CancellationTokenSource _loadCts;
+        private CancellationTokenSource _exportCts;
 
         public ObservableCollection<DeviceFilterItem> DeviceOptions { get; } = new();
         public ObservableCollection<string> TimeRanges { get; } =
@@ -59,9 +60,12 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [ObservableProperty] private string _selectedLogType = "全部";
 
         [ObservableProperty] private bool _isLoading;
+        [ObservableProperty] private bool _isExporting;
         [ObservableProperty] private string _statusText = "就绪";
         [ObservableProperty] private int _operationLogCount;
         [ObservableProperty] private int _temperatureLogCount;
+        [ObservableProperty] private int _totalOperationMatches;
+        [ObservableProperty] private int _totalTemperatureMatches;
 
         /// <summary>当前操作日志视图中的行数（筛选后）</summary>
         [ObservableProperty] private int _operationFilteredCount;
@@ -77,6 +81,10 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
         public ICollectionView OperationLogsView { get; }
         public ICollectionView TemperatureLogsView { get; }
+        public bool IsBusy => IsLoading || IsExporting;
+
+        partial void OnIsLoadingChanged(bool value) => OnPropertyChanged(nameof(IsBusy));
+        partial void OnIsExportingChanged(bool value) => OnPropertyChanged(nameof(IsBusy));
 
         public LogQueryViewModel(DeviceManagerService deviceManager)
         {
@@ -197,7 +205,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     break;
                 case "全部":
                     var confirm = MessageBox.Show(
-                        "选择\"全部\"会拉取数据库内的全部历史记录，可能耗时数秒到数十秒。\n\n是否继续？",
+                        "选择\"全部\"会统计数据库内的全部历史记录；界面只加载最新 5000 条，" +
+                        "并明确显示完整命中数。\n\n是否继续？",
                         "提示", MessageBoxButton.OKCancel, MessageBoxImage.Information);
                     if (confirm != MessageBoxResult.OK)
                     {
@@ -223,33 +232,73 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [RelayCommand]
         private async Task ExportAsync()
         {
+            var previousExport = Interlocked.Exchange(
+                ref _exportCts,
+                new CancellationTokenSource());
+            previousExport?.Cancel();
+            previousExport?.Dispose();
+            var exportSource = _exportCts;
+            var cancellationToken = exportSource.Token;
+
             try
             {
-                if (OperationLogs.Count == 0 && TemperatureLogs.Count == 0)
+                var deviceLabel = SelectedDevice?.DeviceId.HasValue == true
+                    ? SelectedDevice.DisplayName
+                    : "全部设备";
+                var deviceId = SelectedDevice?.DeviceId;
+                var startTime = FilterStartDate;
+                var endTime = FilterEndDate;
+
+                IsExporting = true;
+                UpdateStatusText();
+                using var dataService = new DataService();
+                await dataService.InitializeAsync(cancellationToken);
+                var exportData = await BoundedLogExportLoader.LoadAsync(
+                    dataService,
+                    deviceId,
+                    startTime,
+                    endTime,
+                    includeTemperature: true,
+                    includeOperation: true,
+                    cancellationToken);
+
+                if (exportData.OperationLogs.Count == 0 && exportData.TemperatureLogs.Count == 0)
                 {
-                    MessageBox.Show("当前没有数据可导出，请先查询。", "提示",
+                    MessageBox.Show("当前查询范围内没有数据可导出。", "提示",
                         MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
 
-                var deviceLabel = SelectedDevice?.DeviceId.HasValue == true
-                    ? SelectedDevice.DisplayName
-                    : "全部设备";
-
                 var path = await _excelService.ExportLogsReadablePackageAsync(
                     deviceLabel,
-                    FilterStartDate, FilterEndDate,
-                    TemperatureLogs.ToList(),
-                    OperationLogs.ToList());
+                    startTime,
+                    endTime,
+                    exportData.TemperatureLogs,
+                    exportData.OperationLogs,
+                    cancellationToken);
 
                 MessageBox.Show(
-                    $"导出成功！\n\n范围: {deviceLabel} / {FilterStartDate:yyyy-MM-dd HH:mm} ~ {FilterEndDate:yyyy-MM-dd HH:mm}\n操作日志: {OperationLogs.Count} 条\n温度日志: {TemperatureLogs.Count} 条\n\n工控机可直接打开:\n{path}",
+                    $"导出成功！\n\n范围: {deviceLabel} / {startTime:yyyy-MM-dd HH:mm} ~ {endTime:yyyy-MM-dd HH:mm}\n" +
+                    $"操作日志: {exportData.OperationLogs.Count} 条\n温度日志: {exportData.TemperatureLogs.Count} 条\n\n" +
+                    $"工控机可直接打开:\n{path}",
                     "导出成功", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (OperationCanceledException)
+            {
+                // 窗口关闭或新的导出替换了本次导出。
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"导出失败:\n{ex.Message}", "错误",
                     MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                if (ReferenceEquals(_exportCts, exportSource))
+                {
+                    IsExporting = false;
+                    UpdateStatusText();
+                }
             }
         }
 
@@ -257,10 +306,15 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
         private async Task LoadAsync()
         {
-            // 取消上一次未完成的查询
-            _loadCts?.Cancel();
-            _loadCts = new CancellationTokenSource();
-            var ct = _loadCts.Token;
+            var loadSource = new CancellationTokenSource();
+            var previousLoad = Interlocked.Exchange(ref _loadCts, loadSource);
+            previousLoad?.Cancel();
+            previousLoad?.Dispose();
+            var ct = loadSource.Token;
+
+            var deviceId = SelectedDevice?.DeviceId;
+            var startTime = FilterStartDate;
+            var endTime = FilterEndDate;
 
             var appliedToUi = false;
             var loadFaulted = false;
@@ -271,39 +325,26 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 await RunOnUiAsync(UpdateStatusText);
 
                 using var ds = new DataService();
-                await ds.InitializeAsync();
-                ct.ThrowIfCancellationRequested();
+                await ds.InitializeAsync(ct);
 
-                List<OperationLog> opList;
-                List<TemperatureLog> tempList;
+                var operationTask = ds.GetOperationLogsPagedAsync(
+                    deviceId, startTime, endTime, 0, MaxOperationRows, ct);
+                var temperatureTask = ds.GetTemperatureLogsPagedAsync(
+                    deviceId, startTime, endTime, 0, MaxTemperatureRows, ct);
+                var operationCountTask = ds.GetOperationLogCountAsync(
+                    deviceId, startTime, endTime, ct);
+                var temperatureCountTask = ds.GetTemperatureLogCountAsync(
+                    deviceId, startTime, endTime, ct);
 
-                if (SelectedDevice?.DeviceId is int devId)
-                {
-                    opList = await ds.GetOperationLogsByDevicePagedAsync(devId, FilterStartDate, FilterEndDate, 0, MaxOperationRows);
-                    tempList = await ds.GetTemperatureLogsByDevicePagedAsync(devId, FilterStartDate, FilterEndDate, 0, MaxTemperatureRows);
-                }
-                else
-                {
-                    // 全部设备：把每台设备查询并合并（不在 DataService 里多写一个方法以减少改动面）
-                    opList = new List<OperationLog>();
-                    tempList = new List<TemperatureLog>();
-                    var devices = _deviceManager.Devices.ToList();
-                    var opLimitPerDevice = Math.Max(1, MaxOperationRows / Math.Max(1, devices.Count));
-                    var tempLimitPerDevice = Math.Max(1, MaxTemperatureRows / Math.Max(1, devices.Count));
-
-                    foreach (var d in devices)
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        opList.AddRange(
-                            await ds.GetOperationLogsByDevicePagedAsync(d.Id, FilterStartDate, FilterEndDate, 0, opLimitPerDevice));
-                        tempList.AddRange(
-                            await ds.GetTemperatureLogsByDevicePagedAsync(d.Id, FilterStartDate, FilterEndDate, 0, tempLimitPerDevice));
-                    }
-
-                    // 合并后按时间倒/正序排列
-                    opList = opList.OrderByDescending(l => l.LogTime).ToList();
-                    tempList = tempList.OrderBy(l => l.RecordTime).ToList();
-                }
+                await Task.WhenAll(
+                    operationTask,
+                    temperatureTask,
+                    operationCountTask,
+                    temperatureCountTask);
+                var opList = await operationTask;
+                var tempList = await temperatureTask;
+                var totalOperations = await operationCountTask;
+                var totalTemperatures = await temperatureCountTask;
 
                 ct.ThrowIfCancellationRequested();
 
@@ -318,6 +359,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
                     OperationLogCount = OperationLogs.Count;
                     TemperatureLogCount = TemperatureLogs.Count;
+                    TotalOperationMatches = totalOperations;
+                    TotalTemperatureMatches = totalTemperatures;
 
                     OperationLogsView.Refresh();
                     TemperatureLogsView.Refresh();
@@ -344,12 +387,15 @@ namespace MitsubishiMonitor.Demo.ViewModels
             }
             finally
             {
-                await RunOnUiAsync(() =>
+                if (ReferenceEquals(_loadCts, loadSource))
                 {
-                    IsLoading = false;
-                    if (!appliedToUi && !loadFaulted)
-                        UpdateStatusText();
-                });
+                    await RunOnUiAsync(() =>
+                    {
+                        IsLoading = false;
+                        if (!appliedToUi && !loadFaulted)
+                            UpdateStatusText();
+                    });
+                }
             }
         }
 
@@ -380,12 +426,23 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 return;
             }
 
-            // 命中单次加载上限时明确提示，否则用户会误以为看到的就是全部记录
-            var truncated = OperationLogs.Count >= MaxOperationRows || TemperatureLogs.Count >= MaxTemperatureRows;
+            if (IsExporting)
+            {
+                ShowOperationEmptyState = false;
+                ShowTemperatureEmptyState = false;
+                StatusText = "正在读取完整范围并生成导出包…";
+                return;
+            }
+
+            var truncated = TotalOperationMatches > OperationLogs.Count ||
+                            TotalTemperatureMatches > TemperatureLogs.Count;
             StatusText =
-                $"操作日志 {opShown}/{OperationLogs.Count} 条 · 温度日志 {tempShown}/{TemperatureLogs.Count} 条" +
-                (truncated ? $"（已达单次加载上限 {MaxOperationRows} 条，可缩小时间范围查看更早记录）" : "") +
-                (string.IsNullOrEmpty(SearchText) && SelectedLogType == "全部" ? "" : "（已筛选）");
+                $"操作 {opShown:N0}/{TotalOperationMatches:N0}（已载 {OperationLogs.Count:N0}） · " +
+                $"温度 {tempShown:N0}/{TotalTemperatureMatches:N0}（已载 {TemperatureLogs.Count:N0}）" +
+                (truncated ? $"（界面仅保留各类最新 {MaxOperationRows:N0} 条；可缩小时间范围）" : "") +
+                (string.IsNullOrEmpty(SearchText) && SelectedLogType == "全部"
+                    ? ""
+                    : "（关键字/类型仅筛选当前已加载记录）");
 
             ShowOperationEmptyState = opShown == 0;
             OperationEmptyMessage = OperationLogs.Count == 0
@@ -403,6 +460,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
             if (_disposed) return;
             _disposed = true;
             try { _loadCts?.Cancel(); _loadCts?.Dispose(); } catch { }
+            try { _exportCts?.Cancel(); _exportCts?.Dispose(); } catch { }
         }
     }
 }

@@ -5,544 +5,498 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-using OfficeOpenXml;
+using ClosedXML.Excel;
 using MitsubishiMonitor.Demo.Models;
 
 namespace MitsubishiMonitor.Demo.Services
 {
     /// <summary>
-    /// Excel导出服务
+    /// Excel / CSV / HTML 导出服务。所有最终文件均先写入同目录临时文件，成功后再原子替换；
+    /// 导出行数受统一上限约束，避免 UI 进程因超大工作簿耗尽内存。
     /// </summary>
     public class ExcelExportService
     {
-        static ExcelExportService()
-        {
-            // 设置EPPlus的许可证上下文 (个人/非商业用途)
-            ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
-        }
+        private const int CancellationCheckInterval = 512;
 
-        /// <summary>
-        /// 导出温度日志到Excel
-        /// </summary>
-        public async Task<string> ExportTemperatureLogsAsync(List<TemperatureLog> logs, string filePath = null)
+        public Task<string> ExportTemperatureLogsAsync(
+            List<TemperatureLog> logs,
+            string filePath = null,
+            CancellationToken cancellationToken = default)
         {
-            if (!logs.Any())
+            ArgumentNullException.ThrowIfNull(logs);
+            if (logs.Count == 0)
                 throw new InvalidOperationException("没有数据可导出");
+            EnsureSafeRowCount(logs.Count, 0);
 
-            filePath ??= GetDefaultFilePath("温度日志", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-
-            using var package = new ExcelPackage();
-            var worksheet = package.Workbook.Worksheets.Add("温度日志");
-
-            // 设置标题行
-            worksheet.Cells[1, 1].Value = "序号";
-            worksheet.Cells[1, 2].Value = "设备ID";
-            worksheet.Cells[1, 3].Value = "温度(°C)";
-            worksheet.Cells[1, 4].Value = "是否异常";
-            worksheet.Cells[1, 5].Value = "记录时间";
-
-            // 设置标题样式
-            using (var range = worksheet.Cells[1, 1, 1, 5])
+            filePath ??= GetDefaultFilePath("温度日志");
+            return CreateWorkbookAsync(filePath, cancellationToken, (workbook, token) =>
             {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(0, 188, 212));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            // 填充数据
-            for (int i = 0; i < logs.Count; i++)
-            {
-                var log = logs[i];
-                int row = i + 2;
-
-                worksheet.Cells[row, 1].Value = i + 1;
-                worksheet.Cells[row, 2].Value = log.DeviceId;
-                worksheet.Cells[row, 3].Value = log.Temperature;
-                worksheet.Cells[row, 4].Value = log.IsAbnormal ? "是" : "否";
-                worksheet.Cells[row, 5].Value = log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss");
-
-                // 异常数据标红
-                if (log.IsAbnormal)
+                var sheet = workbook.Worksheets.Add("温度日志");
+                WriteHeader(sheet, new[] { "序号", "设备ID", "温度(°C)", "是否异常", "记录时间" }, "#00BCD4");
+                for (var i = 0; i < logs.Count; i++)
                 {
-                    worksheet.Cells[row, 3].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+                    CheckCancellation(i, token);
+                    var log = logs[i];
+                    var row = i + 2;
+                    sheet.Cell(row, 1).Value = i + 1;
+                    sheet.Cell(row, 2).Value = log.DeviceId;
+                    sheet.Cell(row, 3).Value = log.Temperature;
+                    SetSafeText(sheet.Cell(row, 4), log.IsAbnormal ? "是" : "否");
+                    sheet.Cell(row, 5).Value = log.RecordTime;
+                    sheet.Cell(row, 5).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                    if (log.IsAbnormal)
+                        sheet.Cell(row, 3).Style.Font.FontColor = XLColor.Red;
                 }
-            }
-
-            // 自动调整列宽
-            worksheet.Cells.AutoFitColumns();
-
-            // 保存文件
-            var fileInfo = new FileInfo(filePath);
-            await package.SaveAsAsync(fileInfo);
-
-            return filePath;
+                FinishDataSheet(sheet, new[] { 9d, 12d, 14d, 12d, 22d });
+            });
         }
 
-        /// <summary>
-        /// 导出操作日志到Excel
-        /// </summary>
-        public async Task<string> ExportOperationLogsAsync(List<OperationLog> logs, string filePath = null)
+        public Task<string> ExportOperationLogsAsync(
+            List<OperationLog> logs,
+            string filePath = null,
+            CancellationToken cancellationToken = default)
         {
-            if (!logs.Any())
+            ArgumentNullException.ThrowIfNull(logs);
+            if (logs.Count == 0)
                 throw new InvalidOperationException("没有数据可导出");
+            EnsureSafeRowCount(0, logs.Count);
 
-            filePath ??= GetDefaultFilePath("操作日志", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-
-            using var package = new ExcelPackage();
-            var worksheet = package.Workbook.Worksheets.Add("操作日志");
-
-            // 设置标题行
-            worksheet.Cells[1, 1].Value = "序号";
-            worksheet.Cells[1, 2].Value = "时间";
-            worksheet.Cells[1, 3].Value = "类型";
-            worksheet.Cells[1, 4].Value = "地址";
-            worksheet.Cells[1, 5].Value = "动作";
-            worksheet.Cells[1, 6].Value = "描述";
-            worksheet.Cells[1, 7].Value = "操作员";
-
-            // 设置标题样式
-            using (var range = worksheet.Cells[1, 1, 1, 7])
+            filePath ??= GetDefaultFilePath("操作日志");
+            return CreateWorkbookAsync(filePath, cancellationToken, (workbook, token) =>
             {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(0, 188, 212));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            // 填充数据
-            for (int i = 0; i < logs.Count; i++)
-            {
-                var log = logs[i];
-                int row = i + 2;
-
-                worksheet.Cells[row, 1].Value = i + 1;
-                worksheet.Cells[row, 2].Value = log.LogTime.ToString("yyyy-MM-dd HH:mm:ss");
-                worksheet.Cells[row, 3].Value = log.LogType;
-                worksheet.Cells[row, 4].Value = log.PointAddress;
-                worksheet.Cells[row, 5].Value = log.Action;
-                worksheet.Cells[row, 6].Value = log.Description;
-                worksheet.Cells[row, 7].Value = log.Operator;
-            }
-
-            // 自动调整列宽
-            worksheet.Cells.AutoFitColumns();
-
-            // 保存文件
-            var fileInfo = new FileInfo(filePath);
-            await package.SaveAsAsync(fileInfo);
-
-            return filePath;
-        }
-
-        /// <summary>
-        /// 导出所有数据到一个Excel文件
-        /// </summary>
-        public async Task<string> ExportAllAsync(List<TemperatureLog> tempLogs, List<OperationLog> opLogs, string filePath = null)
-        {
-            // 支持空数据导出模板
-            filePath ??= GetDefaultFilePath("监控数据", DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-
-            // 确保目录存在
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var package = new ExcelPackage();
-
-            // 添加温度日志sheet (始终添加，即使为空)
-            var tempSheet = package.Workbook.Worksheets.Add("温度日志");
-
-            tempSheet.Cells[1, 1].Value = "序号";
-            tempSheet.Cells[1, 2].Value = "温度(°C)";
-            tempSheet.Cells[1, 3].Value = "记录时间";
-
-            using (var range = tempSheet.Cells[1, 1, 1, 3])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(0, 188, 212));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            for (int i = 0; i < tempLogs.Count; i++)
-            {
-                tempSheet.Cells[i + 2, 1].Value = i + 1;
-                tempSheet.Cells[i + 2, 2].Value = tempLogs[i].Temperature;
-                tempSheet.Cells[i + 2, 3].Value = tempLogs[i].RecordTime.ToString("yyyy-MM-dd HH:mm:ss");
-            }
-
-            tempSheet.Cells.AutoFitColumns();
-
-            // 添加操作日志sheet (始终添加，即使为空)
-            var opSheet = package.Workbook.Worksheets.Add("操作日志");
-
-            opSheet.Cells[1, 1].Value = "序号";
-            opSheet.Cells[1, 2].Value = "时间";
-            opSheet.Cells[1, 3].Value = "类型";
-            opSheet.Cells[1, 4].Value = "地址";
-            opSheet.Cells[1, 5].Value = "描述";
-
-            using (var range = opSheet.Cells[1, 1, 1, 5])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(0, 188, 212));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            for (int i = 0; i < opLogs.Count; i++)
-            {
-                opSheet.Cells[i + 2, 1].Value = i + 1;
-                opSheet.Cells[i + 2, 2].Value = opLogs[i].LogTime.ToString("yyyy-MM-dd HH:mm:ss");
-                opSheet.Cells[i + 2, 3].Value = opLogs[i].LogType;
-                opSheet.Cells[i + 2, 4].Value = opLogs[i].PointAddress;
-                opSheet.Cells[i + 2, 5].Value = opLogs[i].Description;
-            }
-
-            opSheet.Cells.AutoFitColumns();
-
-            var fileInfo = new FileInfo(filePath);
-            await package.SaveAsAsync(fileInfo);
-
-            return filePath;
-        }
-
-        /// <summary>
-        /// 导出设备数据（温度+操作日志）
-        /// </summary>
-        public async Task<string> ExportDeviceDataAsync(Device device, List<TemperatureLog> tempLogs, List<OperationLog> opLogs, string filePath = null)
-        {
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            filePath ??= GetDefaultFilePath($"{device.Name}_{timestamp}", timestamp);
-
-            // 确保目录存在
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var package = new ExcelPackage();
-
-            // 添加设备信息sheet
-            var infoSheet = package.Workbook.Worksheets.Add("设备信息");
-            infoSheet.Cells[1, 1].Value = "设备名称";
-            infoSheet.Cells[1, 2].Value = device.Name;
-            infoSheet.Cells[2, 1].Value = "设备位置";
-            infoSheet.Cells[2, 2].Value = device.Location;
-            infoSheet.Cells[3, 1].Value = "IP地址";
-            infoSheet.Cells[3, 2].Value = device.IpAddress;
-            infoSheet.Cells[4, 1].Value = "导出时间";
-            infoSheet.Cells[4, 2].Value = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-
-            // 添加温度日志sheet（增加 设备名 列，使行级数据可独立解读）
-            var tempSheet = package.Workbook.Worksheets.Add("温度记录");
-            tempSheet.Cells[1, 1].Value = "序号";
-            tempSheet.Cells[1, 2].Value = "设备名";
-            tempSheet.Cells[1, 3].Value = "温度(°C)";
-            tempSheet.Cells[1, 4].Value = "热电偶A(V)";
-            tempSheet.Cells[1, 5].Value = "热电偶B(V)";
-            tempSheet.Cells[1, 6].Value = "热电偶C(V)";
-            tempSheet.Cells[1, 7].Value = "是否异常";
-            tempSheet.Cells[1, 8].Value = "记录时间";
-
-            using (var range = tempSheet.Cells[1, 1, 1, 8])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(240, 136, 62));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            for (int i = 0; i < tempLogs.Count; i++)
-            {
-                var log = tempLogs[i];
-                // 老数据可能没存 DeviceName，回退用本次导出的设备名
-                var rowDevName = string.IsNullOrEmpty(log.DeviceName) ? device.Name : log.DeviceName;
-                tempSheet.Cells[i + 2, 1].Value = i + 1;
-                tempSheet.Cells[i + 2, 2].Value = rowDevName;
-                tempSheet.Cells[i + 2, 3].Value = log.Temperature;
-                tempSheet.Cells[i + 2, 4].Value = log.ThermocoupleA;
-                tempSheet.Cells[i + 2, 5].Value = log.ThermocoupleB;
-                tempSheet.Cells[i + 2, 6].Value = log.ThermocoupleC;
-                tempSheet.Cells[i + 2, 7].Value = log.IsAbnormal ? "是" : "否";
-                tempSheet.Cells[i + 2, 8].Value = log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss");
-
-                // 异常数据标红
-                if (log.IsAbnormal)
+                var sheet = workbook.Worksheets.Add("操作日志");
+                WriteHeader(sheet, new[] { "序号", "时间", "类型", "地址", "动作", "描述", "操作员" }, "#00BCD4");
+                for (var i = 0; i < logs.Count; i++)
                 {
-                    tempSheet.Cells[i + 2, 3].Style.Font.Color.SetColor(System.Drawing.Color.Red);
+                    CheckCancellation(i, token);
+                    var log = logs[i];
+                    var row = i + 2;
+                    sheet.Cell(row, 1).Value = i + 1;
+                    sheet.Cell(row, 2).Value = log.LogTime;
+                    sheet.Cell(row, 2).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                    SetSafeText(sheet.Cell(row, 3), log.LogType);
+                    SetSafeText(sheet.Cell(row, 4), log.PointAddress);
+                    SetSafeText(sheet.Cell(row, 5), log.Action);
+                    SetSafeText(sheet.Cell(row, 6), log.Description);
+                    SetSafeText(sheet.Cell(row, 7), log.Operator);
                 }
-            }
-
-            tempSheet.Cells.AutoFitColumns();
-
-            // 添加操作日志sheet（增加 设备名 / 中文点位 两列）
-            var opSheet = package.Workbook.Worksheets.Add("操作日志");
-            opSheet.Cells[1, 1].Value = "序号";
-            opSheet.Cells[1, 2].Value = "时间";
-            opSheet.Cells[1, 3].Value = "设备名";
-            opSheet.Cells[1, 4].Value = "类型";
-            opSheet.Cells[1, 5].Value = "地址";
-            opSheet.Cells[1, 6].Value = "中文点位";
-            opSheet.Cells[1, 7].Value = "动作";
-            opSheet.Cells[1, 8].Value = "描述";
-            opSheet.Cells[1, 9].Value = "操作员";
-
-            using (var range = opSheet.Cells[1, 1, 1, 9])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(76, 175, 80));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-
-            for (int i = 0; i < opLogs.Count; i++)
-            {
-                var log = opLogs[i];
-                var rowDevName = string.IsNullOrEmpty(log.DeviceName) ? device.Name : log.DeviceName;
-                opSheet.Cells[i + 2, 1].Value = i + 1;
-                opSheet.Cells[i + 2, 2].Value = log.LogTime.ToString("yyyy-MM-dd HH:mm:ss");
-                opSheet.Cells[i + 2, 3].Value = rowDevName;
-                opSheet.Cells[i + 2, 4].Value = log.LogType;
-                opSheet.Cells[i + 2, 5].Value = log.PointAddress;
-                opSheet.Cells[i + 2, 6].Value = log.PointLabel;
-                opSheet.Cells[i + 2, 7].Value = log.Action;
-                opSheet.Cells[i + 2, 8].Value = log.Description;
-                opSheet.Cells[i + 2, 9].Value = log.Operator;
-            }
-
-            opSheet.Cells.AutoFitColumns();
-
-            var fileInfo = new FileInfo(filePath);
-            await package.SaveAsAsync(fileInfo);
-
-            return filePath;
+                FinishDataSheet(sheet, new[] { 9d, 22d, 10d, 12d, 12d, 48d, 16d });
+            });
         }
 
-        /// <summary>
-        /// 导出工控机可直接查看的数据包：HTML 查看页 + CSV 明细 + Excel 备份。
-        /// HTML 可用系统自带浏览器打开，CSV 可用记事本打开。
-        /// </summary>
-        public async Task<string> ExportDeviceReadablePackageAsync(Device device, List<TemperatureLog> tempLogs, List<OperationLog> opLogs)
+        public Task<string> ExportAllAsync(
+            List<TemperatureLog> tempLogs,
+            List<OperationLog> opLogs,
+            string filePath = null,
+            CancellationToken cancellationToken = default)
         {
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var directory = GetExportPackageDirectory($"{device.Name}_{timestamp}");
-
-            await ExportDeviceDataAsync(device, tempLogs, opLogs, Path.Combine(directory, "Excel备份.xlsx"));
-
-            var tempCsvPath = Path.Combine(directory, "温度记录.csv");
-            var opCsvPath = Path.Combine(directory, "操作日志.csv");
-            var htmlPath = Path.Combine(directory, "日志查看.html");
-
-            await WriteUtf8BomAsync(tempCsvPath, BuildTemperatureCsv(tempLogs, device.Name));
-            await WriteUtf8BomAsync(opCsvPath, BuildOperationCsv(opLogs, device.Name));
-            await WriteUtf8BomAsync(htmlPath, BuildReadableHtml(
-                device.Name,
-                DateTime.MinValue,
-                DateTime.MinValue,
-                tempLogs,
-                opLogs,
-                device));
-
-            return htmlPath;
+            ValidateLists(tempLogs, opLogs);
+            filePath ??= GetDefaultFilePath("监控数据");
+            return CreateWorkbookAsync(filePath, cancellationToken, (workbook, token) =>
+            {
+                WriteTemperatureSheet(workbook, tempLogs, null, token);
+                WriteOperationSheet(workbook, opLogs, null, token);
+            });
         }
 
-        private string GetDefaultFilePath(string dataType, string timestamp)
+        public Task<string> ExportDeviceDataAsync(
+            Device device,
+            List<TemperatureLog> tempLogs,
+            List<OperationLog> opLogs,
+            string filePath = null,
+            CancellationToken cancellationToken = default)
         {
-            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            return Path.Combine(desktop, "监控数据导出", $"{dataType}.xlsx");
+            ArgumentNullException.ThrowIfNull(device);
+            ValidateLists(tempLogs, opLogs);
+            filePath ??= GetDefaultFilePath($"{device.Name}_{DateTime.Now:yyyyMMdd_HHmmss}");
+
+            return CreateWorkbookAsync(filePath, cancellationToken, (workbook, token) =>
+            {
+                var infoSheet = workbook.Worksheets.Add("设备信息");
+                SetSafeText(infoSheet.Cell(1, 1), "设备名称");
+                SetSafeText(infoSheet.Cell(1, 2), device.Name);
+                SetSafeText(infoSheet.Cell(2, 1), "设备位置");
+                SetSafeText(infoSheet.Cell(2, 2), device.Location);
+                SetSafeText(infoSheet.Cell(3, 1), "IP地址");
+                SetSafeText(infoSheet.Cell(3, 2), device.IpAddress);
+                SetSafeText(infoSheet.Cell(4, 1), "导出时间");
+                infoSheet.Cell(4, 2).Value = DateTime.Now;
+                infoSheet.Cell(4, 2).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                infoSheet.Column(1).Width = 14;
+                infoSheet.Column(2).Width = 36;
+
+                WriteTemperatureSheet(workbook, tempLogs, device.Name, token);
+                WriteOperationSheet(workbook, opLogs, device.Name, token);
+            });
         }
 
-        /// <summary>
-        /// 日志查询页通用导出：温度+操作两个 sheet，每行带"设备名"列，支持多设备混合数据。
-        /// </summary>
-        public async Task<string> ExportLogsAsync(
+        public async Task<string> ExportDeviceReadablePackageAsync(
+            Device device,
+            List<TemperatureLog> tempLogs,
+            List<OperationLog> opLogs,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(device);
+            ValidateLists(tempLogs, opLogs);
+            var finalDirectory = GetUniquePackageDirectory($"{device.Name}_{DateTime.Now:yyyyMMdd_HHmmss}");
+            var stagingDirectory = finalDirectory + ".partial-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(stagingDirectory);
+
+            try
+            {
+                await ExportDeviceDataAsync(
+                    device,
+                    tempLogs,
+                    opLogs,
+                    Path.Combine(stagingDirectory, "Excel备份.xlsx"),
+                    cancellationToken).ConfigureAwait(false);
+
+                var tempCsvTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "温度记录.csv"),
+                    BuildTemperatureCsv(tempLogs, device.Name, cancellationToken),
+                    cancellationToken);
+                var operationCsvTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "操作日志.csv"),
+                    BuildOperationCsv(opLogs, device.Name, cancellationToken),
+                    cancellationToken);
+                var htmlTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "日志查看.html"),
+                    BuildReadableHtml(
+                        device.Name,
+                        DateTime.MinValue,
+                        DateTime.MinValue,
+                        tempLogs,
+                        opLogs,
+                        cancellationToken,
+                        device),
+                    cancellationToken);
+                await Task.WhenAll(tempCsvTask, operationCsvTask, htmlTask).ConfigureAwait(false);
+
+                cancellationToken.ThrowIfCancellationRequested();
+                Directory.Move(stagingDirectory, finalDirectory);
+                return Path.Combine(finalDirectory, "日志查看.html");
+            }
+            catch
+            {
+                TryDeleteDirectory(stagingDirectory);
+                throw;
+            }
+        }
+
+        public Task<string> ExportLogsAsync(
             string deviceLabel,
             DateTime startTime,
             DateTime endTime,
             List<TemperatureLog> tempLogs,
             List<OperationLog> opLogs,
-            string filePath = null)
+            string filePath = null,
+            CancellationToken cancellationToken = default)
         {
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            ValidateLists(tempLogs, opLogs);
             var safeDeviceLabel = SanitizeFileName(deviceLabel);
-            filePath ??= Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-                "监控数据导出",
-                $"日志_{safeDeviceLabel}_{timestamp}.xlsx");
+            filePath ??= GetDefaultFilePath($"日志_{safeDeviceLabel}_{DateTime.Now:yyyyMMdd_HHmmss}");
 
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            return CreateWorkbookAsync(filePath, cancellationToken, (workbook, token) =>
             {
-                Directory.CreateDirectory(directory);
-            }
+                var infoSheet = workbook.Worksheets.Add("查询条件");
+                WriteInfoRow(infoSheet, 1, "设备范围", deviceLabel);
+                WriteInfoRow(infoSheet, 2, "时间范围（起）", startTime.ToString("yyyy-MM-dd HH:mm:ss"));
+                WriteInfoRow(infoSheet, 3, "时间范围（止）", endTime.ToString("yyyy-MM-dd HH:mm:ss"));
+                WriteInfoRow(infoSheet, 4, "温度记录条数", tempLogs.Count.ToString("N0"));
+                WriteInfoRow(infoSheet, 5, "操作日志条数", opLogs.Count.ToString("N0"));
+                WriteInfoRow(infoSheet, 6, "导出时间", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                infoSheet.Column(1).Width = 18;
+                infoSheet.Column(2).Width = 40;
 
-            using var package = new ExcelPackage();
-
-            // 概要 sheet
-            var infoSheet = package.Workbook.Worksheets.Add("查询条件");
-            infoSheet.Cells[1, 1].Value = "设备范围";
-            infoSheet.Cells[1, 2].Value = deviceLabel;
-            infoSheet.Cells[2, 1].Value = "时间范围（起）";
-            infoSheet.Cells[2, 2].Value = startTime.ToString("yyyy-MM-dd HH:mm:ss");
-            infoSheet.Cells[3, 1].Value = "时间范围（止）";
-            infoSheet.Cells[3, 2].Value = endTime.ToString("yyyy-MM-dd HH:mm:ss");
-            infoSheet.Cells[4, 1].Value = "温度记录条数";
-            infoSheet.Cells[4, 2].Value = tempLogs.Count;
-            infoSheet.Cells[5, 1].Value = "操作日志条数";
-            infoSheet.Cells[5, 2].Value = opLogs.Count;
-            infoSheet.Cells[6, 1].Value = "导出时间";
-            infoSheet.Cells[6, 2].Value = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            infoSheet.Cells.AutoFitColumns();
-
-            // 温度记录 sheet
-            var tempSheet = package.Workbook.Worksheets.Add("温度记录");
-            tempSheet.Cells[1, 1].Value = "序号";
-            tempSheet.Cells[1, 2].Value = "设备名";
-            tempSheet.Cells[1, 3].Value = "温度(°C)";
-            tempSheet.Cells[1, 4].Value = "热电偶A(V)";
-            tempSheet.Cells[1, 5].Value = "热电偶B(V)";
-            tempSheet.Cells[1, 6].Value = "热电偶C(V)";
-            tempSheet.Cells[1, 7].Value = "是否异常";
-            tempSheet.Cells[1, 8].Value = "记录时间";
-            using (var range = tempSheet.Cells[1, 1, 1, 8])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(240, 136, 62));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-            for (int i = 0; i < tempLogs.Count; i++)
-            {
-                var log = tempLogs[i];
-                tempSheet.Cells[i + 2, 1].Value = i + 1;
-                tempSheet.Cells[i + 2, 2].Value = log.DeviceName ?? "";
-                tempSheet.Cells[i + 2, 3].Value = log.Temperature;
-                tempSheet.Cells[i + 2, 4].Value = log.ThermocoupleA;
-                tempSheet.Cells[i + 2, 5].Value = log.ThermocoupleB;
-                tempSheet.Cells[i + 2, 6].Value = log.ThermocoupleC;
-                tempSheet.Cells[i + 2, 7].Value = log.IsAbnormal ? "是" : "否";
-                tempSheet.Cells[i + 2, 8].Value = log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss");
-                if (log.IsAbnormal)
-                {
-                    tempSheet.Cells[i + 2, 3].Style.Font.Color.SetColor(System.Drawing.Color.Red);
-                }
-            }
-            tempSheet.Cells.AutoFitColumns();
-
-            // 操作日志 sheet
-            var opSheet = package.Workbook.Worksheets.Add("操作日志");
-            opSheet.Cells[1, 1].Value = "序号";
-            opSheet.Cells[1, 2].Value = "时间";
-            opSheet.Cells[1, 3].Value = "设备名";
-            opSheet.Cells[1, 4].Value = "类型";
-            opSheet.Cells[1, 5].Value = "地址";
-            opSheet.Cells[1, 6].Value = "中文点位";
-            opSheet.Cells[1, 7].Value = "动作";
-            opSheet.Cells[1, 8].Value = "描述";
-            opSheet.Cells[1, 9].Value = "操作员";
-            using (var range = opSheet.Cells[1, 1, 1, 9])
-            {
-                range.Style.Font.Bold = true;
-                range.Style.Fill.PatternType = OfficeOpenXml.Style.ExcelFillStyle.Solid;
-                range.Style.Fill.BackgroundColor.SetColor(System.Drawing.Color.FromArgb(76, 175, 80));
-                range.Style.Font.Color.SetColor(System.Drawing.Color.White);
-            }
-            for (int i = 0; i < opLogs.Count; i++)
-            {
-                var log = opLogs[i];
-                opSheet.Cells[i + 2, 1].Value = i + 1;
-                opSheet.Cells[i + 2, 2].Value = log.LogTime.ToString("yyyy-MM-dd HH:mm:ss");
-                opSheet.Cells[i + 2, 3].Value = log.DeviceName ?? "";
-                opSheet.Cells[i + 2, 4].Value = log.LogType;
-                opSheet.Cells[i + 2, 5].Value = log.PointAddress;
-                opSheet.Cells[i + 2, 6].Value = log.PointLabel ?? "";
-                opSheet.Cells[i + 2, 7].Value = log.Action;
-                opSheet.Cells[i + 2, 8].Value = log.Description;
-                opSheet.Cells[i + 2, 9].Value = log.Operator;
-            }
-            opSheet.Cells.AutoFitColumns();
-
-            var fileInfo = new FileInfo(filePath);
-            await package.SaveAsAsync(fileInfo);
-            return filePath;
+                WriteTemperatureSheet(workbook, tempLogs, "", token);
+                WriteOperationSheet(workbook, opLogs, "", token);
+            });
         }
 
-        /// <summary>
-        /// 日志查询页导出工控机可读包：HTML 查看页 + CSV 明细 + Excel 备份。
-        /// </summary>
         public async Task<string> ExportLogsReadablePackageAsync(
             string deviceLabel,
             DateTime startTime,
             DateTime endTime,
             List<TemperatureLog> tempLogs,
-            List<OperationLog> opLogs)
+            List<OperationLog> opLogs,
+            CancellationToken cancellationToken = default)
         {
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            ValidateLists(tempLogs, opLogs);
             var safeDeviceLabel = SanitizeFileName(deviceLabel);
-            var directory = GetExportPackageDirectory($"日志_{safeDeviceLabel}_{timestamp}");
+            var finalDirectory = GetUniquePackageDirectory(
+                $"日志_{safeDeviceLabel}_{DateTime.Now:yyyyMMdd_HHmmss}");
+            var stagingDirectory = finalDirectory + ".partial-" + Guid.NewGuid().ToString("N");
+            Directory.CreateDirectory(stagingDirectory);
 
-            await ExportLogsAsync(
-                deviceLabel,
-                startTime,
-                endTime,
-                tempLogs,
-                opLogs,
-                Path.Combine(directory, "Excel备份.xlsx"));
+            try
+            {
+                await ExportLogsAsync(
+                    deviceLabel,
+                    startTime,
+                    endTime,
+                    tempLogs,
+                    opLogs,
+                    Path.Combine(stagingDirectory, "Excel备份.xlsx"),
+                    cancellationToken).ConfigureAwait(false);
 
-            var tempCsvPath = Path.Combine(directory, "温度记录.csv");
-            var opCsvPath = Path.Combine(directory, "操作日志.csv");
-            var htmlPath = Path.Combine(directory, "日志查看.html");
+                var tempCsvTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "温度记录.csv"),
+                    BuildTemperatureCsv(tempLogs, "", cancellationToken),
+                    cancellationToken);
+                var operationCsvTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "操作日志.csv"),
+                    BuildOperationCsv(opLogs, "", cancellationToken),
+                    cancellationToken);
+                var htmlTask = WriteUtf8BomAtomicallyAsync(
+                    Path.Combine(stagingDirectory, "日志查看.html"),
+                    BuildReadableHtml(
+                        deviceLabel,
+                        startTime,
+                        endTime,
+                        tempLogs,
+                        opLogs,
+                        cancellationToken),
+                    cancellationToken);
+                await Task.WhenAll(tempCsvTask, operationCsvTask, htmlTask).ConfigureAwait(false);
 
-            await WriteUtf8BomAsync(tempCsvPath, BuildTemperatureCsv(tempLogs, ""));
-            await WriteUtf8BomAsync(opCsvPath, BuildOperationCsv(opLogs, ""));
-            await WriteUtf8BomAsync(htmlPath, BuildReadableHtml(
-                deviceLabel,
-                startTime,
-                endTime,
-                tempLogs,
-                opLogs));
+                cancellationToken.ThrowIfCancellationRequested();
+                Directory.Move(stagingDirectory, finalDirectory);
+                return Path.Combine(finalDirectory, "日志查看.html");
+            }
+            catch
+            {
+                TryDeleteDirectory(stagingDirectory);
+                throw;
+            }
+        }
 
-            return htmlPath;
+        private static async Task<string> CreateWorkbookAsync(
+            string filePath,
+            CancellationToken cancellationToken,
+            Action<XLWorkbook, CancellationToken> populate)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+            var absolutePath = Path.GetFullPath(filePath);
+            var directory = Path.GetDirectoryName(absolutePath)
+                ?? throw new InvalidOperationException("无法确定导出目录");
+            Directory.CreateDirectory(directory);
+
+            await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var workbook = new XLWorkbook();
+                populate(workbook, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
+                SaveWorkbookAtomically(workbook, absolutePath, cancellationToken);
+            }, cancellationToken).ConfigureAwait(false);
+            return absolutePath;
+        }
+
+        private static void SaveWorkbookAtomically(
+            XLWorkbook workbook,
+            string finalPath,
+            CancellationToken cancellationToken)
+        {
+            var directory = Path.GetDirectoryName(finalPath)
+                ?? throw new InvalidOperationException("无法确定导出目录");
+            var extension = Path.GetExtension(finalPath);
+            var temporaryPath = Path.Combine(
+                directory,
+                Path.GetFileNameWithoutExtension(finalPath) +
+                ".tmp-" + Guid.NewGuid().ToString("N") + extension);
+            try
+            {
+                workbook.SaveAs(temporaryPath);
+                cancellationToken.ThrowIfCancellationRequested();
+                File.Move(temporaryPath, finalPath, overwrite: true);
+            }
+            finally
+            {
+                TryDeleteFile(temporaryPath);
+            }
+        }
+
+        private static void WriteTemperatureSheet(
+            XLWorkbook workbook,
+            List<TemperatureLog> logs,
+            string fallbackDeviceName,
+            CancellationToken cancellationToken)
+        {
+            var sheet = workbook.Worksheets.Add("温度记录");
+            WriteHeader(
+                sheet,
+                new[] { "序号", "设备名", "温度(°C)", "热电偶A(V)", "热电偶B(V)", "热电偶C(V)", "是否异常", "记录时间" },
+                "#F0883E");
+
+            for (var i = 0; i < logs.Count; i++)
+            {
+                CheckCancellation(i, cancellationToken);
+                var log = logs[i];
+                var row = i + 2;
+                var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
+                sheet.Cell(row, 1).Value = i + 1;
+                SetSafeText(sheet.Cell(row, 2), deviceName);
+                sheet.Cell(row, 3).Value = log.Temperature;
+                sheet.Cell(row, 4).Value = log.ThermocoupleA;
+                sheet.Cell(row, 5).Value = log.ThermocoupleB;
+                sheet.Cell(row, 6).Value = log.ThermocoupleC;
+                SetSafeText(sheet.Cell(row, 7), log.IsAbnormal ? "是" : "否");
+                sheet.Cell(row, 8).Value = log.RecordTime;
+                sheet.Cell(row, 8).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                if (log.IsAbnormal)
+                    sheet.Cell(row, 3).Style.Font.FontColor = XLColor.Red;
+            }
+
+            FinishDataSheet(sheet, new[] { 9d, 22d, 14d, 14d, 14d, 14d, 12d, 22d });
+        }
+
+        private static void WriteOperationSheet(
+            XLWorkbook workbook,
+            List<OperationLog> logs,
+            string fallbackDeviceName,
+            CancellationToken cancellationToken)
+        {
+            var sheet = workbook.Worksheets.Add("操作日志");
+            WriteHeader(
+                sheet,
+                new[] { "序号", "时间", "设备名", "类型", "地址", "中文点位", "动作", "描述", "操作员" },
+                "#4CAF50");
+
+            for (var i = 0; i < logs.Count; i++)
+            {
+                CheckCancellation(i, cancellationToken);
+                var log = logs[i];
+                var row = i + 2;
+                var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
+                sheet.Cell(row, 1).Value = i + 1;
+                sheet.Cell(row, 2).Value = log.LogTime;
+                sheet.Cell(row, 2).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                SetSafeText(sheet.Cell(row, 3), deviceName);
+                SetSafeText(sheet.Cell(row, 4), log.LogType);
+                SetSafeText(sheet.Cell(row, 5), log.PointAddress);
+                SetSafeText(sheet.Cell(row, 6), log.PointLabel);
+                SetSafeText(sheet.Cell(row, 7), log.Action);
+                SetSafeText(sheet.Cell(row, 8), log.Description);
+                SetSafeText(sheet.Cell(row, 9), log.Operator);
+            }
+
+            FinishDataSheet(sheet, new[] { 9d, 22d, 22d, 10d, 12d, 28d, 12d, 48d, 16d });
+        }
+
+        private static void WriteHeader(
+            IXLWorksheet sheet,
+            IReadOnlyList<string> headers,
+            string backgroundColor)
+        {
+            for (var column = 0; column < headers.Count; column++)
+                SetSafeText(sheet.Cell(1, column + 1), headers[column]);
+
+            var range = sheet.Range(1, 1, 1, headers.Count);
+            range.Style.Font.Bold = true;
+            range.Style.Fill.BackgroundColor = XLColor.FromHtml(backgroundColor);
+            range.Style.Font.FontColor = XLColor.White;
+            range.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        }
+
+        private static void FinishDataSheet(IXLWorksheet sheet, IReadOnlyList<double> widths)
+        {
+            for (var column = 0; column < widths.Count; column++)
+                sheet.Column(column + 1).Width = widths[column];
+            sheet.SheetView.FreezeRows(1);
+            var usedRange = sheet.RangeUsed();
+            if (usedRange != null && usedRange.RowCount() > 1)
+                usedRange.SetAutoFilter();
+        }
+
+        private static void WriteInfoRow(IXLWorksheet sheet, int row, string label, string value)
+        {
+            SetSafeText(sheet.Cell(row, 1), label);
+            SetSafeText(sheet.Cell(row, 2), value);
+            sheet.Cell(row, 1).Style.Font.Bold = true;
+        }
+
+        private static void SetSafeText(IXLCell cell, string value)
+            => cell.Value = ProtectSpreadsheetText(value ?? "");
+
+        private static string ProtectSpreadsheetText(string value)
+        {
+            if (value.Length == 0)
+                return value;
+
+            var first = value[0];
+            var suspicious = first is '=' or '+' or '@' or '\t' or '\r' or '\n';
+            if (first == '-' && !decimal.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out _))
+                suspicious = true;
+            return suspicious ? "'" + value : value;
+        }
+
+        private static string GetDefaultFilePath(string dataType)
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            return Path.Combine(desktop, "监控数据导出", SanitizeFileName(dataType) + ".xlsx");
+        }
+
+        private static string GetUniquePackageDirectory(string name)
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            var root = Path.Combine(desktop, "监控数据导出");
+            Directory.CreateDirectory(root);
+            var basePath = Path.Combine(root, SanitizeFileName(name));
+            var candidate = basePath;
+            for (var suffix = 2; Directory.Exists(candidate) || File.Exists(candidate); suffix++)
+                candidate = basePath + "_" + suffix;
+            return candidate;
         }
 
         private static string SanitizeFileName(string raw)
         {
-            if (string.IsNullOrEmpty(raw)) return "未命名";
+            if (string.IsNullOrWhiteSpace(raw))
+                return "未命名";
             var invalid = Path.GetInvalidFileNameChars();
-            var sb = new System.Text.StringBuilder(raw.Length);
-            foreach (var c in raw)
-                sb.Append(invalid.Contains(c) ? '_' : c);
-            return sb.ToString();
+            var builder = new StringBuilder(raw.Length);
+            foreach (var character in raw.Trim())
+                builder.Append(invalid.Contains(character) ? '_' : character);
+            var sanitized = builder.ToString().TrimEnd('.', ' ');
+            return string.IsNullOrEmpty(sanitized) ? "未命名" : sanitized;
         }
 
-        private string GetExportPackageDirectory(string name)
+        private static async Task WriteUtf8BomAtomicallyAsync(
+            string finalPath,
+            string content,
+            CancellationToken cancellationToken)
         {
-            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            var directory = Path.Combine(desktop, "监控数据导出", SanitizeFileName(name));
-            Directory.CreateDirectory(directory);
-            return directory;
-        }
-
-        private static async Task WriteUtf8BomAsync(string path, string content)
-        {
-            await File.WriteAllTextAsync(path, content, new UTF8Encoding(true));
-        }
-
-        private static string BuildTemperatureCsv(List<TemperatureLog> logs, string fallbackDeviceName)
-        {
-            var sb = new StringBuilder();
-            sb.AppendLine("序号,设备名,温度(℃),热电偶A(V),热电偶B(V),热电偶C(V),是否异常,记录时间");
-            for (int i = 0; i < logs.Count; i++)
+            var temporaryPath = finalPath + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
             {
+                await File.WriteAllTextAsync(
+                    temporaryPath,
+                    content,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: true),
+                    cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                File.Move(temporaryPath, finalPath, overwrite: true);
+            }
+            finally
+            {
+                TryDeleteFile(temporaryPath);
+            }
+        }
+
+        private static string BuildTemperatureCsv(
+            List<TemperatureLog> logs,
+            string fallbackDeviceName,
+            CancellationToken cancellationToken)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("序号,设备名,温度(℃),热电偶A(V),热电偶B(V),热电偶C(V),是否异常,记录时间");
+            for (var i = 0; i < logs.Count; i++)
+            {
+                CheckCancellation(i, cancellationToken);
                 var log = logs[i];
                 var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
-                sb.AppendLine(string.Join(",",
+                builder.AppendLine(string.Join(",",
                     Csv(i + 1),
                     Csv(deviceName),
                     Csv(log.Temperature.ToString("F1", CultureInfo.InvariantCulture)),
@@ -552,18 +506,22 @@ namespace MitsubishiMonitor.Demo.Services
                     Csv(log.IsAbnormal ? "是" : "否"),
                     Csv(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))));
             }
-            return sb.ToString();
+            return builder.ToString();
         }
 
-        private static string BuildOperationCsv(List<OperationLog> logs, string fallbackDeviceName)
+        private static string BuildOperationCsv(
+            List<OperationLog> logs,
+            string fallbackDeviceName,
+            CancellationToken cancellationToken)
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("序号,时间,设备名,类型,地址,中文点位,动作,描述,操作员");
-            for (int i = 0; i < logs.Count; i++)
+            var builder = new StringBuilder();
+            builder.AppendLine("序号,时间,设备名,类型,地址,中文点位,动作,描述,操作员");
+            for (var i = 0; i < logs.Count; i++)
             {
+                CheckCancellation(i, cancellationToken);
                 var log = logs[i];
                 var deviceName = string.IsNullOrEmpty(log.DeviceName) ? fallbackDeviceName : log.DeviceName;
-                sb.AppendLine(string.Join(",",
+                builder.AppendLine(string.Join(",",
                     Csv(i + 1),
                     Csv(log.LogTime.ToString("yyyy-MM-dd HH:mm:ss")),
                     Csv(deviceName),
@@ -574,7 +532,7 @@ namespace MitsubishiMonitor.Demo.Services
                     Csv(log.Description),
                     Csv(log.Operator)));
             }
-            return sb.ToString();
+            return builder.ToString();
         }
 
         private static string BuildReadableHtml(
@@ -583,99 +541,149 @@ namespace MitsubishiMonitor.Demo.Services
             DateTime endTime,
             List<TemperatureLog> tempLogs,
             List<OperationLog> opLogs,
+            CancellationToken cancellationToken,
             Device device = null)
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("<!doctype html>");
-            sb.AppendLine("<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">");
-            sb.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            sb.AppendLine($"<title>{Html(title)} 日志查看</title>");
-            sb.AppendLine("<style>");
-            sb.AppendLine("body{font-family:'Microsoft YaHei UI','Microsoft YaHei',Arial,sans-serif;margin:24px;background:#f3f5f7;color:#1f2933}");
-            sb.AppendLine("h1{font-size:24px;margin:0 0 8px} h2{font-size:18px;margin:28px 0 10px}");
-            sb.AppendLine(".meta{background:#fff;border:1px solid #d7dde5;padding:14px 16px;margin:16px 0 18px}");
-            sb.AppendLine(".meta div{line-height:1.8}.file{color:#475569;font-size:13px}");
-            sb.AppendLine("table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:22px;font-size:13px}");
-            sb.AppendLine("th,td{border:1px solid #d7dde5;padding:7px 8px;text-align:left;vertical-align:top}");
-            sb.AppendLine("th{background:#e9eef5;color:#111827;position:sticky;top:0}.bad{color:#b91c1c;font-weight:700}");
-            sb.AppendLine(".empty{padding:18px;background:#fff;border:1px solid #d7dde5;color:#64748b}");
-            sb.AppendLine("</style></head><body>");
-            sb.AppendLine($"<h1>{Html(title)} 日志查看</h1>");
-            sb.AppendLine("<div class=\"file\">此文件可在未安装 Excel/WPS/数据库工具的工控机上直接查看。</div>");
-            sb.AppendLine("<div class=\"meta\">");
+            var builder = new StringBuilder();
+            builder.AppendLine("<!doctype html>");
+            builder.AppendLine("<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">");
+            builder.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+            builder.AppendLine($"<title>{Html(title)} 日志查看</title>");
+            builder.AppendLine("<style>");
+            builder.AppendLine("body{font-family:'Microsoft YaHei UI','Microsoft YaHei',Arial,sans-serif;margin:24px;background:#f3f5f7;color:#1f2933}");
+            builder.AppendLine("h1{font-size:24px;margin:0 0 8px} h2{font-size:18px;margin:28px 0 10px}");
+            builder.AppendLine(".meta{background:#fff;border:1px solid #d7dde5;padding:14px 16px;margin:16px 0 18px}.meta div{line-height:1.8}");
+            builder.AppendLine(".file{color:#475569;font-size:13px}table{border-collapse:collapse;width:100%;background:#fff;margin-bottom:22px;font-size:13px}");
+            builder.AppendLine("th,td{border:1px solid #d7dde5;padding:7px 8px;text-align:left;vertical-align:top}th{background:#e9eef5;color:#111827;position:sticky;top:0}");
+            builder.AppendLine(".bad{color:#b91c1c;font-weight:700}.empty{padding:18px;background:#fff;border:1px solid #d7dde5;color:#64748b}");
+            builder.AppendLine("</style></head><body>");
+            builder.AppendLine($"<h1>{Html(title)} 日志查看</h1>");
+            builder.AppendLine("<div class=\"file\">此文件可在未安装 Excel/WPS/数据库工具的工控机上直接查看。</div>");
+            builder.AppendLine("<div class=\"meta\">");
             if (device != null)
             {
-                sb.AppendLine($"<div><b>设备名称：</b>{Html(device.Name)}</div>");
-                sb.AppendLine($"<div><b>设备位置：</b>{Html(device.Location)}</div>");
-                sb.AppendLine($"<div><b>IP 地址：</b>{Html(device.IpAddress)}</div>");
+                builder.AppendLine($"<div><b>设备名称：</b>{Html(device.Name)}</div>");
+                builder.AppendLine($"<div><b>设备位置：</b>{Html(device.Location)}</div>");
+                builder.AppendLine($"<div><b>IP 地址：</b>{Html(device.IpAddress)}</div>");
             }
             else
             {
-                sb.AppendLine($"<div><b>设备范围：</b>{Html(title)}</div>");
-                sb.AppendLine($"<div><b>查询时间：</b>{Html(startTime.ToString("yyyy-MM-dd HH:mm:ss"))} ~ {Html(endTime.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
+                builder.AppendLine($"<div><b>设备范围：</b>{Html(title)}</div>");
+                builder.AppendLine($"<div><b>查询时间：</b>{Html(startTime.ToString("yyyy-MM-dd HH:mm:ss"))} ~ {Html(endTime.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
             }
-            sb.AppendLine($"<div><b>导出时间：</b>{Html(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
-            sb.AppendLine($"<div><b>温度记录：</b>{tempLogs.Count} 条</div>");
-            sb.AppendLine($"<div><b>操作日志：</b>{opLogs.Count} 条</div>");
-            sb.AppendLine("</div>");
+            builder.AppendLine($"<div><b>导出时间：</b>{Html(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"))}</div>");
+            builder.AppendLine($"<div><b>温度记录：</b>{tempLogs.Count:N0} 条</div>");
+            builder.AppendLine($"<div><b>操作日志：</b>{opLogs.Count:N0} 条</div>");
+            builder.AppendLine("</div>");
 
-            sb.AppendLine("<h2>操作日志</h2>");
+            builder.AppendLine("<h2>操作日志</h2>");
             if (opLogs.Count == 0)
             {
-                sb.AppendLine("<div class=\"empty\">暂无操作日志。</div>");
+                builder.AppendLine("<div class=\"empty\">暂无操作日志。</div>");
             }
             else
             {
-                sb.AppendLine("<table><thead><tr><th>序号</th><th>时间</th><th>设备名</th><th>类型</th><th>地址</th><th>中文点位</th><th>动作</th><th>描述</th><th>操作员</th></tr></thead><tbody>");
-                for (int i = 0; i < opLogs.Count; i++)
+                builder.AppendLine("<table><thead><tr><th>序号</th><th>时间</th><th>设备名</th><th>类型</th><th>地址</th><th>中文点位</th><th>动作</th><th>描述</th><th>操作员</th></tr></thead><tbody>");
+                for (var i = 0; i < opLogs.Count; i++)
                 {
+                    CheckCancellation(i, cancellationToken);
                     var log = opLogs[i];
                     var deviceName = string.IsNullOrEmpty(log.DeviceName) ? device?.Name ?? "" : log.DeviceName;
-                    sb.AppendLine("<tr>" +
+                    builder.AppendLine("<tr>" +
                         $"<td>{i + 1}</td><td>{Html(log.LogTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td>" +
                         $"<td>{Html(deviceName)}</td><td>{Html(log.LogType)}</td><td>{Html(log.PointAddress)}</td>" +
                         $"<td>{Html(log.PointLabel)}</td><td>{Html(log.Action)}</td><td>{Html(log.Description)}</td><td>{Html(log.Operator)}</td>" +
                         "</tr>");
                 }
-                sb.AppendLine("</tbody></table>");
+                builder.AppendLine("</tbody></table>");
             }
 
-            sb.AppendLine("<h2>温度记录</h2>");
+            builder.AppendLine("<h2>温度记录</h2>");
             if (tempLogs.Count == 0)
             {
-                sb.AppendLine("<div class=\"empty\">暂无温度记录。</div>");
+                builder.AppendLine("<div class=\"empty\">暂无温度记录。</div>");
             }
             else
             {
-                sb.AppendLine("<table><thead><tr><th>序号</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>记录时间</th></tr></thead><tbody>");
-                for (int i = 0; i < tempLogs.Count; i++)
+                builder.AppendLine("<table><thead><tr><th>序号</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>记录时间</th></tr></thead><tbody>");
+                for (var i = 0; i < tempLogs.Count; i++)
                 {
+                    CheckCancellation(i, cancellationToken);
                     var log = tempLogs[i];
                     var deviceName = string.IsNullOrEmpty(log.DeviceName) ? device?.Name ?? "" : log.DeviceName;
                     var abnormalClass = log.IsAbnormal ? " class=\"bad\"" : "";
-                    sb.AppendLine("<tr>" +
+                    builder.AppendLine("<tr>" +
                         $"<td>{i + 1}</td><td>{Html(deviceName)}</td><td{abnormalClass}>{Html(log.Temperature.ToString("F1", CultureInfo.InvariantCulture))}</td>" +
                         $"<td>{Html(log.ThermocoupleA.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.ThermocoupleB.ToString("F3", CultureInfo.InvariantCulture))}</td>" +
                         $"<td>{Html(log.ThermocoupleC.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.IsAbnormal ? "是" : "否")}</td>" +
-                        $"<td>{Html(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td>" +
-                        "</tr>");
+                        $"<td>{Html(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td></tr>");
                 }
-                sb.AppendLine("</tbody></table>");
+                builder.AppendLine("</tbody></table>");
             }
 
-            sb.AppendLine("</body></html>");
-            return sb.ToString();
+            builder.AppendLine("</body></html>");
+            return builder.ToString();
         }
 
         private static string Csv(object value)
         {
             var text = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+            text = ProtectSpreadsheetText(text);
             return "\"" + text.Replace("\"", "\"\"") + "\"";
         }
 
-        private static string Html(string value)
+        private static string Html(string value) => WebUtility.HtmlEncode(value ?? "");
+
+        private static void ValidateLists(
+            List<TemperatureLog> temperatureLogs,
+            List<OperationLog> operationLogs)
         {
-            return WebUtility.HtmlEncode(value ?? "");
+            ArgumentNullException.ThrowIfNull(temperatureLogs);
+            ArgumentNullException.ThrowIfNull(operationLogs);
+            EnsureSafeRowCount(temperatureLogs.Count, operationLogs.Count);
+        }
+
+        private static void EnsureSafeRowCount(int temperatureCount, int operationCount)
+        {
+            var combined = checked(temperatureCount + operationCount);
+            if (combined > BoundedLogExportLoader.MaximumCombinedRows)
+            {
+                throw new InvalidOperationException(
+                    $"待导出数据共 {combined:N0} 条，超过单次导出安全上限 " +
+                    $"{BoundedLogExportLoader.MaximumCombinedRows:N0} 条。请缩小时间范围。");
+            }
+        }
+
+        private static void CheckCancellation(int index, CancellationToken cancellationToken)
+        {
+            if (index % CancellationCheckInterval == 0)
+                cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch
+            {
+                // 临时文件清理失败不能覆盖真正的导出异常。
+            }
+        }
+
+        private static void TryDeleteDirectory(string path)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+            }
+            catch
+            {
+                // 仅清理由本次调用创建、带随机后缀的暂存目录。
+            }
         }
     }
 }

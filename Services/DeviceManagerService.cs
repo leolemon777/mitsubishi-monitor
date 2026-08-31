@@ -46,6 +46,11 @@ namespace MitsubishiMonitor.Demo.Services
                     Device.HasTemperatureSample = true;
                     // 温度卡片的更新时间只能来自真实温度采样，不能用手动刷新时间伪造。
                     Device.LastUpdateTime = status.LastTemperatureSampleTime;
+                    Device.LastTemperatureSampleTime = status.LastTemperatureSampleTime;
+                    Device.LastTemperatureSampleSequence = status.LastTemperatureSampleSequence;
+                    Device.LastTemperatureConnectionGeneration = status.LastTemperatureConnectionGeneration;
+                    Device.LastTemperatureRawValue = status.LastTemperatureRawValue;
+                    Device.TemperatureQuality = status.TemperatureQuality;
                     Device.HasAlert = status.IsAlarm;
                 }
 
@@ -91,9 +96,13 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly AutoExportService _autoExport;
         private TowerLightService _towerLight;
         private string _lastTowerLightState = "";
+        private readonly CancellationTokenSource _lifecycleCts = new();
+        private Task _databaseInitializationTask = Task.CompletedTask;
+        private Task _towerInitializationTask = Task.CompletedTask;
+        private Task _startupCleanupTask = Task.CompletedTask;
 
         /// <summary>
-        /// 已用户主动连接过的设备 Id 集合（仅这些设备会触发后台自动重连，避免应用启动后无脑连接）
+        /// 当前允许连接/发现的设备 Id 集合。自动待机与要求在线设备在内，停用设备排除。
         /// </summary>
         private readonly ConcurrentDictionary<int, byte> _autoReconnectIds = new();
 
@@ -101,6 +110,23 @@ namespace MitsubishiMonitor.Demo.Services
         /// 正在执行重连任务的设备 Id（防止同一设备并发重连）
         /// </summary>
         private readonly ConcurrentDictionary<int, byte> _reconnectingIds = new();
+
+        /// <summary>正在执行手动/启动探测的设备 Id，防止监控节拍并发安排第二条连接链。</summary>
+        private readonly ConcurrentDictionary<int, byte> _connectingIds = new();
+
+        internal sealed class ReconnectState
+        {
+            public int Attempt;
+            public long NextRetryTimestamp;
+            public DateTimeOffset? NextRetryAt;
+            public string LastReason = "";
+            public long ScheduleVersion;
+        }
+
+        private readonly ConcurrentDictionary<int, ReconnectState> _reconnectStates = new();
+        private readonly SemaphoreSlim _reconnectGate = new(1, 1);
+        private const int ReconnectJitterPercent = 20;
+        private static readonly ThreadLocal<Random> ReconnectRandom = new(() => new Random());
 
         /// <summary>
         /// PLC 点位变化可能很频繁，主界面只需要展示累计次数。
@@ -119,6 +145,11 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly Dictionary<int, Device> _deviceMap = new();
 
         public ReadOnlyObservableCollection<Device> Devices { get; }
+
+        /// <summary>
+        /// 仅供视频录制的隔离演示模式。启用时不会创建 PLC 传输或三色灯连接。
+        /// </summary>
+        public bool IsDemoVideoMode { get; }
 
         /// <summary>
         /// 设备状态变化事件（掉线或恢复）
@@ -148,6 +179,48 @@ namespace MitsubishiMonitor.Demo.Services
         [ObservableProperty]
         private bool _hasActiveAlarm;
 
+        [ObservableProperty]
+        private bool _isAlarmAcknowledged;
+
+        [ObservableProperty]
+        private bool _isDatabaseHealthy;
+
+        [ObservableProperty]
+        private string _databaseHealthText = "数据库启动中";
+
+        [ObservableProperty]
+        private int _pendingDatabaseLogCount;
+
+        [ObservableProperty]
+        private long _spooledDatabaseLogCount;
+
+        [ObservableProperty]
+        private long _droppedDatabaseLogCount;
+
+        [ObservableProperty]
+        private long _deadLetterDatabaseLogCount;
+
+        [ObservableProperty]
+        private DateTime? _lastDatabaseWriteTime;
+
+        [ObservableProperty]
+        private bool _isAutoExportEnabled;
+
+        [ObservableProperty]
+        private bool _isAutoExportHealthy = true;
+
+        [ObservableProperty]
+        private string _autoExportHealthText = "自动导出未启用";
+
+        [ObservableProperty]
+        private int _pendingAutoExportLogCount;
+
+        [ObservableProperty]
+        private long _droppedAutoExportLogCount;
+
+        [ObservableProperty]
+        private DateTime? _lastAutoExportWriteTime;
+
         private bool _isBuzzerMuted; // 方式B：消音标志
 
         /// <summary>
@@ -157,7 +230,10 @@ namespace MitsubishiMonitor.Demo.Services
         /// </summary>
         public void AcknowledgeAlarm()
         {
+            if (!HasActiveAlarm)
+                return;
             _isBuzzerMuted = true;
+            IsAlarmAcknowledged = true;
             _lastTowerLightState = ""; // 强制下次更新重新下发指令
 
             // 立即触发一次状态更新
@@ -166,34 +242,70 @@ namespace MitsubishiMonitor.Demo.Services
 
         public DeviceManagerService()
         {
+            IsDemoVideoMode = App.IsDemoVideoMode;
             _wrappers = new ObservableCollection<DevicePlcWrapper>();
             _devices = new ObservableCollection<Device>();
             Devices = new ReadOnlyObservableCollection<Device>(_devices);
 
             _dataService = new DataService();
             _logBuffer = new LogBufferService();
+            _logBuffer.HealthChanged += OnStorageHealthChanged;
             _autoExport = new AutoExportService();
+            _autoExport.HealthChanged += OnAutoExportHealthChanged;
+            IsAutoExportEnabled = !string.IsNullOrWhiteSpace(_autoExport.ExportPath);
+            AutoExportHealthText = IsAutoExportEnabled ? "自动导出等待首次写入" : "自动导出未启用";
 
             // DB 初始化完成后才允许 LogBuffer 写入，避免表不存在导致数据丢失
-            Task.Run(async () =>
+            _databaseInitializationTask = Task.Run(async () =>
             {
                 try
                 {
-                    await _dataService.InitializeAsync();
-                    _logBuffer.IsDbReady = true;
+                    await _dataService.InitializeAsync(_lifecycleCts.Token);
+                    _lifecycleCts.Token.ThrowIfCancellationRequested();
+                    _logBuffer.SetDatabaseReady();
                     System.Diagnostics.Debug.WriteLine("[DeviceManager] DB 初始化完成，LogBuffer 写入已启用");
+                }
+                catch (OperationCanceledException) when (_lifecycleCts.IsCancellationRequested)
+                {
+                    // 程序退出时不再发布初始化结果。
                 }
                 catch (Exception ex)
                 {
+                    _logBuffer.SetDatabaseUnavailable($"数据库初始化失败：{ex.Message}");
                     System.Diagnostics.Debug.WriteLine($"[DeviceManager] DB 初始化失败: {ex.Message}");
                 }
             });
 
             // 三色灯初始化移到后台线程，WMI 串口扫描可能耗时数秒甚至数十秒，不能阻塞 UI
-            Task.Run(() =>
+            if (!IsDemoVideoMode)
             {
-                _towerLight = InitializeTowerLight();
-            });
+                _towerInitializationTask = Task.Run(() =>
+                {
+                    TowerLightService initialized = null;
+                    try
+                    {
+                        initialized = InitializeTowerLight();
+                        if (_stopped || _lifecycleCts.IsCancellationRequested)
+                        {
+                            initialized?.Dispose();
+                            return;
+                        }
+
+                        var previous = Interlocked.Exchange(ref _towerLight, initialized);
+                        initialized = null;
+                        previous?.Dispose();
+
+                        // 关闭动作可能恰好发生在上面的检查与发布之间，再检查一次消除尾部泄漏。
+                        if (_stopped || _lifecycleCts.IsCancellationRequested)
+                            Interlocked.Exchange(ref _towerLight, null)?.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        initialized?.Dispose();
+                        System.Diagnostics.Debug.WriteLine($"[三色灯] 后台初始化异常: {ex.Message}");
+                    }
+                });
+            }
 
             InitializeDevices();
 
@@ -203,7 +315,7 @@ namespace MitsubishiMonitor.Demo.Services
             _monitorTimer.AutoReset = true;
             _monitorTimer.Start();
 
-            // 数据库历史数据清理（每小时一次，删除 30 天前的温度/操作日志）
+            // 数据库历史数据清理（每小时一次，删除 15 天前的温度/操作日志）
             _cleanupTimer = new System.Timers.Timer(TimeSpan.FromHours(1).TotalMilliseconds);
             _cleanupTimer.Elapsed += OnCleanupTimerElapsed;
             _cleanupTimer.AutoReset = true;
@@ -216,10 +328,17 @@ namespace MitsubishiMonitor.Demo.Services
             _operationCountFlushTimer.Start();
 
             // 启动后立即异步清理一次，避免长期未运行的实例堆积大量历史
-            _ = Task.Run(async () =>
+            _startupCleanupTask = Task.Run(async () =>
             {
-                await Task.Delay(TimeSpan.FromMinutes(1));
-                await CleanupOldDataSafelyAsync();
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(1), _lifecycleCts.Token);
+                    await CleanupOldDataSafelyAsync(_lifecycleCts.Token);
+                }
+                catch (OperationCanceledException) when (_lifecycleCts.IsCancellationRequested)
+                {
+                    // 正常退出。
+                }
             });
         }
 
@@ -233,12 +352,16 @@ namespace MitsubishiMonitor.Demo.Services
                 Interlocked.Exchange(ref _isCleaning, 0));
         }
 
-        private async Task CleanupOldDataSafelyAsync()
+        private async Task CleanupOldDataSafelyAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                await _dataService.CleanOldDataAsync();
-                System.Diagnostics.Debug.WriteLine($"[数据清理] 已删除 30 天前的历史数据");
+                await _dataService.CleanOldDataAsync(cancellationToken);
+                System.Diagnostics.Debug.WriteLine($"[数据清理] 已删除 15 天前的历史数据");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -340,6 +463,8 @@ namespace MitsubishiMonitor.Demo.Services
                                         device.HasAlert = hasAlert;
                                     if (!device.IsOnline)
                                         device.IsOnline = true;
+                                    device.IsConnecting = false;
+                                    device.HasCommunicationFault = false;
                                     if (device.IsReconnecting)
                                         device.IsReconnecting = false;
                                     var isTemperatureDelayedNow = snapshot.Wrapper.PlcService is MitsubishiPlcService currentMitsubishi &&
@@ -352,7 +477,7 @@ namespace MitsubishiMonitor.Demo.Services
 
                                     if (!wasOnline)
                                     {
-                                        DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                                        SafeEventDispatcher.Invoke(this, DeviceStatusChanged, new DeviceStatusChangeEventArgs
                                         {
                                             Device = device,
                                             WasOnline = false,
@@ -364,7 +489,8 @@ namespace MitsubishiMonitor.Demo.Services
                                 }
                                 else
                                 {
-                                    offlineList.Add(device);
+                                    if (DeviceMonitoringPolicy.IsExpectedOnline(device.MonitoringMode))
+                                        offlineList.Add(device);
                                     if (device.IsOnline)
                                         device.IsOnline = false;
                                     // 保留最后一个有效温度供现场判断，但必须明确打上过期标记。
@@ -373,10 +499,18 @@ namespace MitsubishiMonitor.Demo.Services
                                     var isReconnecting = _reconnectingIds.ContainsKey(device.Id);
                                     if (device.IsReconnecting != isReconnecting)
                                         device.IsReconnecting = isReconnecting;
+                                    var isConnecting = _connectingIds.ContainsKey(device.Id);
+                                    if (device.IsConnecting != isConnecting)
+                                        device.IsConnecting = isConnecting;
+                                    device.HasCommunicationFault =
+                                        DeviceMonitoringPolicy.IsExpectedOnline(device.MonitoringMode) &&
+                                        _autoReconnectIds.ContainsKey(device.Id) &&
+                                        !isReconnecting &&
+                                        !isConnecting;
 
                                     if (wasOnline)
                                     {
-                                        DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                                        SafeEventDispatcher.Invoke(this, DeviceStatusChanged, new DeviceStatusChangeEventArgs
                                         {
                                             Device = device,
                                             WasOnline = true,
@@ -516,53 +650,228 @@ namespace MitsubishiMonitor.Demo.Services
         }
 
         /// <summary>
-        /// 后台异步重连一台离线设备：
-        /// - 仅对已通过 ConnectDeviceAsync/ConnectAllDevicesAsync 成功连过的设备生效；
-        /// - 同一设备同一时刻只允许一个重连任务（_reconnectingIds 互斥）；
-        /// - 成功后自动重启采集；失败则等下一次监控周期再尝试。
+        /// 后台异步重连一台离线设备。断线事件和监控定时器都只会唤醒同一个
+        /// 带指数退避的调度器，不能因为一次 2 秒超时就立即创建下一代连接。
         /// </summary>
         private void TryScheduleReconnect(DevicePlcWrapper wrapper)
         {
             int id = wrapper.Device.Id;
-            if (!_autoReconnectIds.ContainsKey(id))
-                return; // 用户未连接过或主动断开过
+            var mode = wrapper.Device.MonitoringMode;
+            if (!DeviceMonitoringPolicy.IsConnectionAuthorized(mode) ||
+                !_autoReconnectIds.ContainsKey(id))
+                return;
+            if (_connectingIds.ContainsKey(id))
+                return;
+
+            // 底层同步调用已经达到熔断上限时不再制造无意义的重连任务；
+            // 迟到任务释放后熔断器会自动闭合，下一轮监控再尝试。
+            if (wrapper.PlcService is MitsubishiPlcService mitsubishi &&
+                mitsubishi.IsCircuitBreakerOpen)
+            {
+                SetDeviceConnectionActivity(
+                    wrapper.Device,
+                    connecting: false,
+                    reconnecting: false,
+                    communicationFault: DeviceMonitoringPolicy.IsExpectedOnline(mode));
+                return;
+            }
 
             if (!_reconnectingIds.TryAdd(id, 0))
-                return; // 已经有重连任务在跑
+                return; // 已经有重连任务或退避等待在跑
+
+            var reconnectState = _reconnectStates.GetOrAdd(id, _ => new ReconnectState());
+            int attempt;
+            TimeSpan delay;
+            long scheduleVersion;
+            DateTimeOffset? scheduledAt;
+            lock (reconnectState)
+            {
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (reconnectState.NextRetryTimestamp > now)
+                {
+                    _reconnectingIds.TryRemove(id, out _);
+                    return;
+                }
+
+                attempt = Math.Min(1000, reconnectState.Attempt + 1);
+                delay = ComputeReconnectDelay(mode, attempt);
+                reconnectState.Attempt = attempt;
+                scheduleVersion = ++reconnectState.ScheduleVersion;
+                reconnectState.NextRetryAt = DateTimeOffset.UtcNow + delay;
+                reconnectState.NextRetryTimestamp = now + (long)(delay.TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
+                scheduledAt = reconnectState.NextRetryAt;
+            }
+
+            SetReconnectInfo(wrapper.Device, attempt, scheduledAt?.LocalDateTime);
+            SetDeviceConnectionActivity(wrapper.Device, connecting: false, reconnecting: true, communicationFault: false);
 
             var w = wrapper;
             _ = Task.Run(async () =>
             {
                 var restored = false;
+                var failureReason = "";
                 try
                 {
-                    if (_stopped || !_autoReconnectIds.ContainsKey(id))
+                    if (_stopped || !_autoReconnectIds.ContainsKey(id) ||
+                        !IsReconnectScheduleCurrent(reconnectState, scheduleVersion))
                         return;
 
-                    System.Diagnostics.Debug.WriteLine($"[自动重连] 尝试重连 {w.Device.Name} ({w.Device.IpAddress})");
-                    var ok = await w.PlcService.ConnectAsync();
-                    if (ok)
+                    if (delay > TimeSpan.Zero)
+                        await Task.Delay(delay, _lifecycleCts.Token).ConfigureAwait(false);
+
+                    await _reconnectGate.WaitAsync(_lifecycleCts.Token).ConfigureAwait(false);
+                    try
                     {
-                        restored = TryStartAcquisitionIfStillAuthorized(w, id, "自动重连");
-                        if (restored)
-                            System.Diagnostics.Debug.WriteLine($"[自动重连] ✓ {w.Device.Name} 已恢复");
+                        if (_stopped || !_autoReconnectIds.ContainsKey(id) ||
+                            !IsReconnectScheduleCurrent(reconnectState, scheduleVersion))
+                            return;
+
+                        System.Diagnostics.Debug.WriteLine($"[自动重连] 第{attempt}次尝试 {w.Device.Name} ({w.Device.IpAddress})");
+                        var ok = await w.PlcService.ConnectAsync().ConfigureAwait(false);
+                        if (ok)
+                        {
+                            restored = TryStartAcquisitionIfStillAuthorized(w, id, "自动重连");
+                            if (restored)
+                                System.Diagnostics.Debug.WriteLine($"[自动重连] ✓ {w.Device.Name} 已建立并等待有效样本");
+                        }
+                        else
+                        {
+                            failureReason = (w.PlcService as MitsubishiPlcService)?.LastConnectionError ?? "连接失败";
+                            System.Diagnostics.Debug.WriteLine($"[自动重连] ✗ {w.Device.Name} 第{attempt}次失败: {failureReason}");
+                        }
                     }
-                    else
+                    finally
                     {
-                        var err = (w.PlcService as MitsubishiPlcService)?.LastConnectionError ?? "";
-                        System.Diagnostics.Debug.WriteLine($"[自动重连] ✗ {w.Device.Name} 失败: {err}");
+                        _reconnectGate.Release();
                     }
+                }
+                catch (OperationCanceledException) when (_lifecycleCts.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
+                    failureReason = ex.Message;
                     System.Diagnostics.Debug.WriteLine($"[自动重连] {w.Device.Name} 异常: {ex.Message}");
                 }
                 finally
                 {
+                    var scheduleCurrent = IsReconnectScheduleCurrent(reconnectState, scheduleVersion);
                     _reconnectingIds.TryRemove(id, out _);
-                    UpdateDeviceOnlineState(w);
+
+                    // finally 中不能 return；过期任务只清理自己的占位，不得覆盖新一代
+                    // 调度状态，也不得在生命周期已停止后再次安排重试。
+                    if (scheduleCurrent && !_stopped &&
+                        !_lifecycleCts.IsCancellationRequested &&
+                        _autoReconnectIds.ContainsKey(id))
+                    {
+                        // 失败后立即开放调度闸门。退避只由下一次调度任务内的
+                        // Task.Delay 应用一次；这里若再推迟一个退避时长，同一份
+                        // 延迟会被闸门和任务内等待各消耗一次，实际重连间隔
+                        // 会变成策略值的约两倍。下一次真实重试时间由下一轮
+                        // 调度（≤5 秒监控节拍）计算并刷新到界面。
+                        var nextAttempt = ApplyReconnectOutcome(
+                            reconnectState,
+                            restored,
+                            failureReason);
+                        SetReconnectInfo(w.Device, nextAttempt, null);
+                        UpdateDeviceOnlineState(w);
+                    }
                 }
             });
+        }
+
+        /// <summary>
+        /// 推进一次重连尝试结束后的调度状态。失败时必须立即开放闸门，
+        /// 退避由下一次调度任务内的延迟单独承担；恢复时清零等待重试。
+        /// 返回当前尝试次数供界面显示。
+        /// </summary>
+        internal static int ApplyReconnectOutcome(
+            ReconnectState state,
+            bool restored,
+            string failureReason)
+        {
+            lock (state)
+            {
+                state.LastReason = failureReason ?? "";
+                state.NextRetryTimestamp = restored ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+                state.NextRetryAt = null;
+                return state.Attempt;
+            }
+        }
+
+        private static bool IsReconnectScheduleCurrent(ReconnectState state, long scheduleVersion)
+        {
+            lock (state)
+                return state.ScheduleVersion == scheduleVersion;
+        }
+
+        private void CancelScheduledReconnect(int deviceId)
+        {
+            _reconnectingIds.TryRemove(deviceId, out _);
+            if (!_reconnectStates.TryGetValue(deviceId, out var state))
+                return;
+
+            lock (state)
+            {
+                state.ScheduleVersion++;
+                state.NextRetryTimestamp = 0;
+                state.NextRetryAt = null;
+                state.Attempt = 0;
+                state.LastReason = "";
+            }
+
+            if (GetDevice(deviceId) is { } device)
+                SetReconnectInfo(device, 0, null);
+        }
+
+        private static TimeSpan ComputeReconnectDelay(DeviceMonitoringMode mode, int attempt)
+        {
+            var policyDelay = DeviceMonitoringPolicy.GetReconnectDelay(mode, attempt);
+            if (policyDelay == Timeout.InfiniteTimeSpan)
+                return policyDelay;
+            var jitter = 1d + ((ReconnectRandom.Value?.NextDouble() ?? 0.5d) * 2d - 1d) *
+                ReconnectJitterPercent / 100d;
+            return TimeSpan.FromSeconds(Math.Max(1d, policyDelay.TotalSeconds * jitter));
+        }
+
+        private void MarkReconnectHealthy(int deviceId, TemperatureSampleEventArgs sample)
+        {
+            if (sample == null || sample.Quality != TemperatureSampleQuality.Valid)
+                return;
+
+            if (!_reconnectStates.TryGetValue(deviceId, out var state))
+                return;
+
+            lock (state)
+            {
+                state.Attempt = 0;
+                state.NextRetryTimestamp = 0;
+                state.NextRetryAt = null;
+                state.LastReason = "";
+            }
+
+            var device = GetDevice(deviceId);
+            if (device != null)
+                SetReconnectInfo(device, 0, null);
+        }
+
+        private static void SetReconnectInfo(Device device, int attempt, DateTime? nextRetryAt)
+        {
+            if (device == null)
+                return;
+
+            void Apply()
+            {
+                device.ReconnectAttempt = Math.Max(0, attempt);
+                device.NextReconnectAt = nextRetryAt;
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                Apply();
+            else
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Apply));
         }
 
         private void OnPlcConnectionStateChanged(
@@ -571,6 +880,25 @@ namespace MitsubishiMonitor.Demo.Services
         {
             UpdateDeviceOnlineState(wrapper);
             if (!isConnected && !_stopped)
+                TryScheduleReconnect(wrapper);
+        }
+
+        private void OnPlcConnectionSnapshotChanged(
+            DevicePlcWrapper wrapper,
+            PlcConnectionSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return;
+
+            UpdateDeviceOnlineState(wrapper);
+            // 事件在后台线程发布，旧代的迟到关闭/异常可能晚于新代上线到达。
+            // 仅允许当前服务代次触发自动重连，避免新连接刚建立就被旧事件踢回退避。
+            var currentSnapshot = wrapper.PlcService.ConnectionSnapshot;
+            if (currentSnapshot == null || currentSnapshot.Generation != snapshot.Generation)
+                return;
+
+            if (!_stopped &&
+                snapshot.Phase is PlcConnectionPhase.CommunicationFault or PlcConnectionPhase.Disconnected)
                 TryScheduleReconnect(wrapper);
         }
 
@@ -686,35 +1014,52 @@ namespace MitsubishiMonitor.Demo.Services
 
         /// <summary>
         /// 根据所有设备状态更新三色灯：
-        /// 任意设备 temp > 报警阈值 → 红灯 + 蜂鸣器
-        /// 所有在线设备无超温       → 绿灯，蜂鸣器关
-        /// 未连接任何设备           → 灭灯
+        /// 任意参与监控且新鲜的温度超过报警阈值 → 红灯 + 蜂鸣器；
+        /// 要求在线设备离线/过期，或已在线的自动待机设备数据过期 → 黄灯；
+        /// 自动待机设备正常关机、停用设备均不参与灯态。
         /// </summary>
         public async Task UpdateTowerLightAsync()
         {
+            await Task.CompletedTask.ConfigureAwait(false);
             if (_towerLight == null) return;
             if (Interlocked.Exchange(ref _isUpdatingTowerLight, 1) == 1)
                 return;
 
             try
             {
-                bool anyOnline = false;
-                bool anyAlarm  = false;  // 温度超过报警阈值 → 红灯
+                var towerStates = new List<TowerLightPolicy.DeviceState>();
 
                 foreach (var wrapper in _wrappers.ToList())
                 {
-                    if (!wrapper.Device.IsOnline)
-                        continue;
-
-                    anyOnline = true;
+                    var device = wrapper.Device;
+                    var isFresh = device.IsOnline &&
+                                  device.HasTemperatureSample &&
+                                  !device.IsTemperatureStale &&
+                                  !device.IsReconnecting;
                     float temp = wrapper.PlcService.CurrentStatus.Temperature;
                     float threshold = wrapper.PlcService.Config.TemperatureThreshold;
-                    if (threshold <= 0) threshold = 90f;
-
-                    if (temp > threshold) anyAlarm = true;
+                    towerStates.Add(new TowerLightPolicy.DeviceState(
+                        device.MonitoringMode,
+                        device.IsOnline,
+                        isFresh,
+                        isFresh && temp > threshold));
                 }
 
-                // 更新 HasActiveAlarm（供 UI 复位按钮显示）
+                var anyAlarm = towerStates.Any(state =>
+                    DeviceMonitoringPolicy.ParticipatesInTowerLight(
+                        state.MonitoringMode,
+                        state.IsOnline) &&
+                    state.IsFresh &&
+                    state.HasActiveAlarm);
+
+                var alarmWasActive = HasActiveAlarm;
+                if (anyAlarm && !alarmWasActive)
+                {
+                    _isBuzzerMuted = false;
+                    IsAlarmAcknowledged = false;
+                }
+
+                // 更新 HasActiveAlarm（供 UI 确认/消音按钮显示）
                 if (HasActiveAlarm != anyAlarm)
                 {
                     var dispatcher = App.Current?.Dispatcher;
@@ -727,40 +1072,27 @@ namespace MitsubishiMonitor.Demo.Services
                 if (!anyAlarm)
                 {
                     _isBuzzerMuted = false;
+                    IsAlarmAcknowledged = false;
                 }
 
-                // 优先级：红灯（超温+可能蜂鸣）> 绿灯（正常）> 灭灯（未连接）
-                string desiredState;
-                if (anyAlarm)
-                    desiredState = _isBuzzerMuted ? "Red+BuzzerOff" : "Red+BuzzerOn";
-                else if (anyOnline)
-                    desiredState = "Green+BuzzerOff";
-                else
-                    desiredState = "Off";
+                var decision = TowerLightPolicy.Decide(
+                    towerStates,
+                    hasSystemFault: !IsDatabaseHealthy ||
+                                    DroppedDatabaseLogCount > 0 ||
+                                    DeadLetterDatabaseLogCount > 0 ||
+                                    (IsAutoExportEnabled &&
+                                     (!IsAutoExportHealthy || DroppedAutoExportLogCount > 0)),
+                    isBuzzerMuted: _isBuzzerMuted);
+                var desiredState = decision.ToString();
 
                 // 状态没变不重复写串口
                 if (string.Equals(_lastTowerLightState, desiredState, StringComparison.Ordinal))
                     return;
 
-                bool ok;
-                switch (desiredState)
-                {
-                    case "Red+BuzzerOn":
-                        ok = (await _towerLight.SendAsync("Red")) & (await _towerLight.SendAsync("BuzzerOn"));
-                        break;
-                    case "Red+BuzzerOff":
-                        ok = (await _towerLight.SendAsync("Red")) & (await _towerLight.SendAsync("BuzzerOff"));
-                        break;
-                    case "Green+BuzzerOff":
-                        ok = (await _towerLight.SendAsync("Green")) & (await _towerLight.SendAsync("BuzzerOff"));
-                        break;
-                    default:
-                        ok = await _towerLight.SendAsync("Off");
-                        break;
-                }
-
-                if (ok)
-                    _lastTowerLightState = desiredState;
+                // 只提交最新期望状态；串口 Open/Write/Read 由 TowerLightService 的
+                // 专用后台状态泵执行，不能在 Dispatcher 或监控线程上同步操作。
+                _towerLight.QueueDesiredState(desiredState);
+                _lastTowerLightState = desiredState;
             }
             catch (Exception ex)
             {
@@ -774,7 +1106,7 @@ namespace MitsubishiMonitor.Demo.Services
 
         /// <summary>
         /// 初始化设备配置
-        /// 配置6台设备，IP地址按 192.168.1.10/15/20/25/30/35 排列
+        /// 配置4台设备，IP地址从已验证的 config.json 读取
         /// </summary>
         private void InitializeDevices()
         {
@@ -798,6 +1130,10 @@ namespace MitsubishiMonitor.Demo.Services
                     IpAddress = config.Ip,
                     Port = 5000,
                     IsOnline = false,
+                    IsDemoMode = IsDemoVideoMode,
+                    MonitoringMode = config.Id - 1 < AppConfig.DeviceMonitoringModes.Length
+                        ? AppConfig.DeviceMonitoringModes[config.Id - 1]
+                        : DeviceMonitoringMode.AutoStandby,
                     CurrentTemperature = 0,
                     HasAlert = false,
                     TodayOperationCount = 0,
@@ -815,7 +1151,19 @@ namespace MitsubishiMonitor.Demo.Services
                     {
                         Name = device.Name,
                         IpAddress = device.IpAddress,
-                        Port = device.Port
+                        Port = device.Port,
+                        ActualTemperatureDefinition = new TemperatureRegisterDefinition
+                        {
+                            Address = "D12",
+                            DataType = PlcRegisterDataType.Int32,
+                            Divisor = 10f
+                        },
+                        TargetTemperatureDefinition = new TemperatureRegisterDefinition
+                        {
+                            Address = "D210",
+                            DataType = PlcRegisterDataType.Int32,
+                            Divisor = 10f
+                        }
                     };
 
                 // 从持久化配置中恢复报警阈值（deviceIndex = Id-1）
@@ -823,7 +1171,9 @@ namespace MitsubishiMonitor.Demo.Services
                 if (deviceIndex >= 0 && deviceIndex < AppConfig.DeviceThresholds.Length)
                     plcConfig.TemperatureThreshold = AppConfig.DeviceThresholds[deviceIndex];
 
-                var plcService = new MitsubishiPlcService(plcConfig);
+                IPlcService plcService = IsDemoVideoMode
+                    ? new DemoPlcService(plcConfig, device.Id)
+                    : new MitsubishiPlcService(plcConfig);
                 var wrapper = new DevicePlcWrapper(device, plcService);
 
                 // 订阅该设备的IO点变化事件，写入数据库日志
@@ -831,12 +1181,14 @@ namespace MitsubishiMonitor.Demo.Services
                 plcService.StateChanged += (s, e) => OnPlcStateChanged(capturedId, e);
 
                 // 订阅温度采样事件，写入温度日志
-                plcService.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
+                if (plcService is MitsubishiPlcService mitsubishiPlc)
+                    mitsubishiPlc.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
+                else if (plcService is DemoPlcService demoPlc)
+                    demoPlc.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
 
-                // 通信层一旦判定掉线，立即把 UI 标为过期并进入受白名单保护的重连，
-                // 不必再等最长 5 秒的监控定时器。
-                plcService.ConnectionStateChanged += (s, isConnected) =>
-                    OnPlcConnectionStateChanged(wrapper, isConnected);
+                // 使用结构化状态，区分 TCP、MC 协议验证、等待首样本和真正新鲜在线。
+                plcService.ConnectionStateChangedDetailed += (s, args) =>
+                    OnPlcConnectionSnapshotChanged(wrapper, args?.Snapshot);
 
                 _devices.Add(device);
                 _wrappers.Add(wrapper);
@@ -924,6 +1276,18 @@ namespace MitsubishiMonitor.Demo.Services
                 // --- 温度地址 ---
                 TemperatureAddress = "D320",
                 TargetTemperatureAddress = "D420", // 反应槽设定温度（用于超温报警判断）
+                ActualTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D320",
+                    DataType = PlcRegisterDataType.Int32,
+                    Divisor = 10f
+                },
+                TargetTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D420",
+                    DataType = PlcRegisterDataType.Int32,
+                    Divisor = 10f
+                },
 
                 // --- 无热电偶电压 ---
                 ThermocoupleAAddress = "",
@@ -1038,6 +1402,18 @@ namespace MitsubishiMonitor.Demo.Services
                 TemperatureAddress = "D10",
                 TemperatureIsWord = true,        // D10为16位Word寄存器，非DINT，用ReadInt16读取
                 TargetTemperatureAddress = "D280", // 与设备4一致，反应槽第一道设定温度
+                ActualTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D10",
+                    DataType = PlcRegisterDataType.Int16,
+                    Divisor = 10f
+                },
+                TargetTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D280",
+                    DataType = PlcRegisterDataType.Int16,
+                    Divisor = 10f
+                },
                 ThermocoupleAAddress = "",
                 ThermocoupleBAddress = "",
                 ThermocoupleCAddress = "",
@@ -1174,6 +1550,18 @@ namespace MitsubishiMonitor.Demo.Services
                 TemperatureIsWord = true,      // D10 为 16 位 Word 寄存器
                 TemperatureDivisor = 10f,      // D10 存储 temp×10（如 845=84.5°C），显示需除以10
                 TargetTemperatureAddress = "D280", // 反应槽第一道设定温度（用于报警判断）
+                ActualTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D10",
+                    DataType = PlcRegisterDataType.Int16,
+                    Divisor = 10f
+                },
+                TargetTemperatureDefinition = new TemperatureRegisterDefinition
+                {
+                    Address = "D280",
+                    DataType = PlcRegisterDataType.Int16,
+                    Divisor = 10f
+                },
                 ThermocoupleAAddress = "",
                 ThermocoupleBAddress = "",
                 ThermocoupleCAddress = "",
@@ -1195,31 +1583,60 @@ namespace MitsubishiMonitor.Demo.Services
 
         public async Task<bool> ConnectDeviceAsync(int deviceId)
         {
+            if (!IsDemoVideoMode && !AppConfig.IsConfigurationValid)
+                return false;
+
             var wrapper = _wrappers.FirstOrDefault(d => d.Device.Id == deviceId);
             if (wrapper == null) return false;
 
-            // 只要触发了连接，都记入自动重连白名单，保证即使当前PLC未开机，后续开机时也会自动连上。
+            // 从“停用”按钮重新启用时，恢复为现场默认的自动待机策略。
+            if (wrapper.Device.MonitoringMode == DeviceMonitoringMode.Disabled)
+            {
+                if (!IsDemoVideoMode)
+                    AppConfig.SaveDeviceMonitoringMode(deviceId - 1, DeviceMonitoringMode.AutoStandby);
+                wrapper.Device.MonitoringMode = DeviceMonitoringMode.AutoStandby;
+            }
+
+            CancelScheduledReconnect(deviceId);
+            if (!_connectingIds.TryAdd(deviceId, 0))
+                return wrapper.PlcService.CurrentStatus.IsConnected;
+            SetDeviceConnectionActivity(wrapper.Device, connecting: true, reconnecting: false, communicationFault: false);
+
             _autoReconnectIds.TryAdd(deviceId, 0);
 
-            var success = await wrapper.PlcService.ConnectAsync();
-            if (success)
+            var success = false;
+            try
             {
-                success = TryStartAcquisitionIfStillAuthorized(wrapper, deviceId, "手动连接");
+                success = await wrapper.PlcService.ConnectAsync();
+                if (success)
+                    success = TryStartAcquisitionIfStillAuthorized(wrapper, deviceId, "手动连接");
+                return success;
             }
-            UpdateDeviceOnlineState(wrapper);
-            return success;
+            finally
+            {
+                _connectingIds.TryRemove(deviceId, out _);
+                UpdateDeviceOnlineState(wrapper);
+                if (!success && !_stopped)
+                    TryScheduleReconnect(wrapper);
+            }
         }
 
         /// <summary>
-        /// 断开指定设备
+        /// 停用指定设备。停用是持久化策略，不再后台探测；程序退出使用 DisconnectAllDevices，
+        /// 不会改变用户配置。
         /// </summary>
         public void DisconnectDevice(int deviceId)
         {
             var wrapper = _wrappers.FirstOrDefault(d => d.Device.Id == deviceId);
             if (wrapper != null)
             {
-                // 用户主动断开，移出自动重连白名单
+                if (!IsDemoVideoMode)
+                    AppConfig.SaveDeviceMonitoringMode(deviceId - 1, DeviceMonitoringMode.Disabled);
+                wrapper.Device.MonitoringMode = DeviceMonitoringMode.Disabled;
                 _autoReconnectIds.TryRemove(deviceId, out _);
+                _connectingIds.TryRemove(deviceId, out _);
+                CancelScheduledReconnect(deviceId);
+                SetDeviceConnectionActivity(wrapper.Device, connecting: false, reconnecting: false, communicationFault: false);
                 wrapper.PlcService.StopAcquisition();
                 wrapper.PlcService.Disconnect();
                 UpdateDeviceOnlineState(wrapper);
@@ -1232,10 +1649,18 @@ namespace MitsubishiMonitor.Demo.Services
         public async Task<(int successCount, List<string> failedReasons)> ConnectAllDevicesAsync()
         {
             var failedReasons = new List<string>();
+            if (!IsDemoVideoMode && !AppConfig.IsConfigurationValid)
+            {
+                failedReasons.Add($"配置未通过校验：{AppConfig.ConfigurationError}");
+                return (0, failedReasons);
+            }
             // 保留锁参数，兼容 ConnectOneAsync；当前启动链路改为顺序错峰连接。
             var failedReasonsLock = new object();
 
-            var wrapperList = _wrappers.ToList();
+            var wrapperList = _wrappers
+                .Where(wrapper => DeviceMonitoringPolicy.IsConnectionAuthorized(
+                    wrapper.Device.MonitoringMode))
+                .ToList();
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
             Views.MainWindow.DbgLog("DeviceManagerService:ConnectAll", "开始顺序连接全部 PLC", new
             {
@@ -1271,6 +1696,10 @@ namespace MitsubishiMonitor.Demo.Services
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                CancelScheduledReconnect(wrapper.Device.Id);
+                if (!_connectingIds.TryAdd(wrapper.Device.Id, 0))
+                    return;
+                SetDeviceConnectionActivity(wrapper.Device, connecting: true, reconnecting: false, communicationFault: false);
                 Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "开始连接 PLC", new
                 {
                     device = wrapper.Device.Name,
@@ -1278,7 +1707,6 @@ namespace MitsubishiMonitor.Demo.Services
                     orderIndex
                 }, "CONNECT");
 
-                // 只要触发了连接（无论是启动自动连接还是手动连接全部），都记入自动重连白名单，保证即使当前PLC未开机，后续开机时也会自动连上。
                 _autoReconnectIds.TryAdd(wrapper.Device.Id, 0);
 
                 var success = await wrapper.PlcService.ConnectAsync();
@@ -1297,6 +1725,7 @@ namespace MitsubishiMonitor.Demo.Services
 
                 if (success)
                 {
+                    _connectingIds.TryRemove(wrapper.Device.Id, out _);
                     UpdateDeviceOnlineState(wrapper);
                     sw.Stop();
                     Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接成功并启动采集", new
@@ -1308,12 +1737,16 @@ namespace MitsubishiMonitor.Demo.Services
                 }
                 else
                 {
+                    _connectingIds.TryRemove(wrapper.Device.Id, out _);
                     var err = (wrapper.PlcService as MitsubishiPlcService)?.LastConnectionError;
-                    if (!string.IsNullOrEmpty(err))
+                    if (DeviceMonitoringPolicy.IsExpectedOnline(wrapper.Device.MonitoringMode))
                     {
                         lock (failedReasonsLock)
-                            failedReasons.Add($"{wrapper.Device.Name}: {err}");
+                            failedReasons.Add($"{wrapper.Device.Name}: {err ?? "连接失败"}");
                     }
+                    UpdateDeviceOnlineState(wrapper);
+                    if (!_stopped)
+                        TryScheduleReconnect(wrapper);
                     sw.Stop();
                     Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接失败", new
                     {
@@ -1326,6 +1759,7 @@ namespace MitsubishiMonitor.Demo.Services
             }
             catch (Exception ex)
             {
+                _connectingIds.TryRemove(wrapper.Device.Id, out _);
                 sw.Stop();
                 System.Diagnostics.Debug.WriteLine($"连接设备 {wrapper.Device.Name} 失败: {ex.Message}");
                 Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "PLC 连接异常", new
@@ -1335,9 +1769,65 @@ namespace MitsubishiMonitor.Demo.Services
                     elapsedMs = sw.ElapsedMilliseconds,
                     error = ex.Message
                 }, "CONNECT");
-                lock (failedReasonsLock)
-                    failedReasons.Add($"{wrapper.Device.Name}: {ex.Message}");
+                if (DeviceMonitoringPolicy.IsExpectedOnline(wrapper.Device.MonitoringMode))
+                {
+                    lock (failedReasonsLock)
+                        failedReasons.Add($"{wrapper.Device.Name}: {ex.Message}");
+                }
+                UpdateDeviceOnlineState(wrapper);
+                if (!_stopped)
+                    TryScheduleReconnect(wrapper);
             }
+        }
+
+        /// <summary>
+        /// 设置页保存后应用四台设备策略。自动待机/要求在线设备进入发现范围；
+        /// 停用设备立即撤销正在等待的重连并断开传输。
+        /// </summary>
+        public void ApplyMonitoringModes(DeviceMonitoringMode[] modes)
+        {
+            if (modes == null || modes.Length != _wrappers.Count)
+                throw new ArgumentException("设备运行模式必须与设备数量一致", nameof(modes));
+            if (modes.Any(mode => !Enum.IsDefined(mode)))
+                throw new ArgumentException("设备运行模式包含无效值", nameof(modes));
+
+            foreach (var wrapper in _wrappers)
+            {
+                var device = wrapper.Device;
+                var mode = modes[device.Id - 1];
+                device.MonitoringMode = mode;
+                CancelScheduledReconnect(device.Id);
+
+                if (!DeviceMonitoringPolicy.IsConnectionAuthorized(mode))
+                {
+                    _autoReconnectIds.TryRemove(device.Id, out _);
+                    SetDeviceConnectionActivity(
+                        device,
+                        connecting: false,
+                        reconnecting: false,
+                        communicationFault: false);
+                    wrapper.PlcService.StopAcquisition();
+                    wrapper.PlcService.Disconnect();
+                    UpdateDeviceOnlineState(wrapper);
+                    continue;
+                }
+
+                _autoReconnectIds.TryAdd(device.Id, 0);
+                if (!wrapper.PlcService.CurrentStatus.IsConnected)
+                    TryScheduleReconnect(wrapper);
+                else
+                    UpdateDeviceOnlineState(wrapper);
+            }
+
+            var requiredOffline = _wrappers
+                .Select(wrapper => wrapper.Device)
+                .Where(device =>
+                    DeviceMonitoringPolicy.IsExpectedOnline(device.MonitoringMode) &&
+                    !device.IsOnline)
+                .ToList();
+            UpdateOfflineDevicesOnUiThread(requiredOffline);
+            _lastTowerLightState = "";
+            _ = UpdateTowerLightAsync();
         }
 
         /// <summary>
@@ -1347,6 +1837,13 @@ namespace MitsubishiMonitor.Demo.Services
         {
             // 程序退出/批量断开时，清空自动重连白名单，避免后台 Task 继续重连
             _autoReconnectIds.Clear();
+            foreach (var state in _reconnectStates.Values)
+            {
+                lock (state)
+                    state.ScheduleVersion++;
+            }
+            _reconnectingIds.Clear();
+            _connectingIds.Clear();
 
             foreach (var wrapper in _wrappers)
             {
@@ -1376,6 +1873,12 @@ namespace MitsubishiMonitor.Demo.Services
                 var actualOnline = wrapper.PlcService.CurrentStatus.IsConnected;
                 device.IsOnline = actualOnline;
                 device.IsReconnecting = !actualOnline && _reconnectingIds.ContainsKey(device.Id);
+                device.IsConnecting = !actualOnline && _connectingIds.ContainsKey(device.Id);
+                device.HasCommunicationFault = !actualOnline &&
+                    DeviceMonitoringPolicy.IsExpectedOnline(device.MonitoringMode) &&
+                    _autoReconnectIds.ContainsKey(device.Id) &&
+                    !device.IsReconnecting &&
+                    !device.IsConnecting;
 
                 var sampleTime = wrapper.PlcService.CurrentStatus.LastTemperatureSampleTime;
                 if (sampleTime != default)
@@ -1383,6 +1886,11 @@ namespace MitsubishiMonitor.Demo.Services
                     device.CurrentTemperature = wrapper.PlcService.CurrentStatus.Temperature;
                     device.HasTemperatureSample = true;
                     device.LastUpdateTime = sampleTime;
+                    device.LastTemperatureSampleTime = sampleTime;
+                    device.LastTemperatureSampleSequence = wrapper.PlcService.CurrentStatus.LastTemperatureSampleSequence;
+                    device.LastTemperatureConnectionGeneration = wrapper.PlcService.CurrentStatus.LastTemperatureConnectionGeneration;
+                    device.LastTemperatureRawValue = wrapper.PlcService.CurrentStatus.LastTemperatureRawValue;
+                    device.TemperatureQuality = wrapper.PlcService.CurrentStatus.TemperatureQuality;
                     device.IsTemperatureStale = !actualOnline ||
                         (wrapper.PlcService is MitsubishiPlcService mitsubishi &&
                          mitsubishi.IsTemperatureSampleDelayed(out _));
@@ -1393,10 +1901,11 @@ namespace MitsubishiMonitor.Demo.Services
                     // 最后有效值并明确标记过期。
                     device.IsTemperatureStale = actualOnline || device.HasTemperatureSample;
                 }
+                device.RefreshTemperatureFreshness();
 
                 if (wasOnline != actualOnline)
                 {
-                    DeviceStatusChanged?.Invoke(this, new DeviceStatusChangeEventArgs
+                    SafeEventDispatcher.Invoke(this, DeviceStatusChanged, new DeviceStatusChangeEventArgs
                     {
                         Device = device,
                         WasOnline = wasOnline,
@@ -1414,6 +1923,73 @@ namespace MitsubishiMonitor.Demo.Services
                 Update();
             else
                 dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Update));
+        }
+
+        private static void SetDeviceConnectionActivity(
+            Device device,
+            bool connecting,
+            bool reconnecting,
+            bool communicationFault)
+        {
+            if (device == null)
+                return;
+
+            void Apply()
+            {
+                device.IsConnecting = connecting;
+                device.IsReconnecting = reconnecting;
+                device.HasCommunicationFault = communicationFault;
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                Apply();
+            else
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Apply));
+        }
+
+        private void OnStorageHealthChanged(object sender, StorageHealthSnapshot snapshot)
+        {
+            void Apply()
+            {
+                IsDatabaseHealthy = snapshot.IsReady && snapshot.IsHealthy && snapshot.DroppedCount == 0;
+                DatabaseHealthText = snapshot.Message;
+                PendingDatabaseLogCount = snapshot.PendingCount;
+                SpooledDatabaseLogCount = snapshot.SpoolCount;
+                DroppedDatabaseLogCount = snapshot.DroppedCount;
+                DeadLetterDatabaseLogCount = snapshot.DeadLetterCount;
+                LastDatabaseWriteTime = snapshot.LastSuccessfulWriteTime;
+                _lastTowerLightState = "";
+                _ = UpdateTowerLightAsync();
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                Apply();
+            else
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Apply));
+        }
+
+        private void OnAutoExportHealthChanged(object sender, StorageHealthSnapshot snapshot)
+        {
+            void Apply()
+            {
+                IsAutoExportEnabled = snapshot.IsReady;
+                IsAutoExportHealthy = !snapshot.IsReady ||
+                                      (snapshot.IsHealthy && snapshot.DroppedCount == 0);
+                AutoExportHealthText = snapshot.Message;
+                PendingAutoExportLogCount = snapshot.PendingCount;
+                DroppedAutoExportLogCount = snapshot.DroppedCount;
+                LastAutoExportWriteTime = snapshot.LastSuccessfulWriteTime;
+                _lastTowerLightState = "";
+                _ = UpdateTowerLightAsync();
+            }
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.CheckAccess())
+                Apply();
+            else
+                dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(Apply));
         }
 
         /// <summary>
@@ -1470,17 +2046,28 @@ namespace MitsubishiMonitor.Demo.Services
                     ThermocoupleC = e.ThermocoupleC,
                     RecordTime = e.SampleTime,
                     IsAbnormal = e.IsAbnormal,
-                    Threshold = e.TargetTemperature
+                    Threshold = GetAlarmThreshold(deviceId),
+                    AlarmThreshold = GetAlarmThreshold(deviceId),
+                    TargetTemperature = e.TargetTemperature,
+                    AuxiliarySampleTime = e.AuxiliarySampleTime,
+                    HasFreshAuxiliaryData = e.HasFreshAuxiliaryData
                 };
                 _logBuffer.EnqueueTemperatureLog(log);
                 // 入队自动导出 HTML（后台 3 秒批量落盘，不在事件线程做磁盘 IO）
                 _autoExport.AppendTemperatureLog(log);
+                MarkReconnectHealthy(deviceId, e);
                 UpdateDeviceTemperatureFromSample(deviceId, e);
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[温度入库] 设备{deviceId} 入队失败: {ex.Message}");
             }
+        }
+
+        private float GetAlarmThreshold(int deviceId)
+        {
+            var threshold = GetPlcService(deviceId)?.Config?.TemperatureThreshold ?? 90f;
+            return float.IsFinite(threshold) && threshold >= 0f ? threshold : 90f;
         }
 
         /// <summary>
@@ -1503,7 +2090,8 @@ namespace MitsubishiMonitor.Demo.Services
                 var wrapper = _wrappers.FirstOrDefault(w => w.Device.Id == deviceId);
                 var currentStatus = wrapper?.PlcService.CurrentStatus;
                 if (currentStatus == null ||
-                    currentStatus.LastTemperatureSampleTime != e.SampleTime)
+                    currentStatus.LastTemperatureConnectionGeneration != e.ConnectionGeneration ||
+                    currentStatus.LastTemperatureSampleSequence != e.SampleSequence)
                 {
                     // Dispatcher 排队期间可能已经换代并收到更新样本，旧事件不得倒灌。
                     return;
@@ -1517,6 +2105,11 @@ namespace MitsubishiMonitor.Demo.Services
                 // IsAbnormal 由 MitsubishiPlcService 按设定温度判断，直接使用，无需硬编码 90°C
                 device.HasAlert = e.IsAbnormal;
                 device.LastUpdateTime = e.SampleTime;
+                device.LastTemperatureSampleTime = e.SampleTime;
+                device.LastTemperatureSampleSequence = e.SampleSequence;
+                device.LastTemperatureConnectionGeneration = e.ConnectionGeneration;
+                device.LastTemperatureRawValue = e.RawValue;
+                device.TemperatureQuality = e.Quality;
             }
 
             try
@@ -1566,6 +2159,7 @@ namespace MitsubishiMonitor.Demo.Services
         {
             if (_stopped) return;
             _stopped = true;
+            _lifecycleCts.Cancel();
 
             try { _monitorTimer?.Stop(); _monitorTimer?.Dispose(); } catch { }
             try { _cleanupTimer?.Stop(); _cleanupTimer?.Dispose(); } catch { }
@@ -1574,10 +2168,22 @@ namespace MitsubishiMonitor.Demo.Services
 
             DisconnectAllDevices();
 
-            try { _towerLight?.Dispose(); } catch { }
+            try { Interlocked.Exchange(ref _towerLight, null)?.Dispose(); } catch { }
+            try { _logBuffer.HealthChanged -= OnStorageHealthChanged; } catch { }
+            try { _autoExport.HealthChanged -= OnAutoExportHealthChanged; } catch { }
             try { _logBuffer?.Dispose(); } catch { }
             try { _autoExport?.Dispose(); } catch { }
             try { (_dataService as IDisposable)?.Dispose(); } catch { }
+            _ = Task.WhenAll(
+                    _databaseInitializationTask,
+                    _towerInitializationTask,
+                    _startupCleanupTask)
+                .ContinueWith(task =>
+                {
+                    if (task.IsFaulted)
+                        System.Diagnostics.Debug.WriteLine($"[DeviceManager] 后台初始化收尾异常: {task.Exception}");
+                    _lifecycleCts.Dispose();
+                }, TaskScheduler.Default);
             System.Diagnostics.Debug.WriteLine("[DeviceManager] 已停止，AutoExport 文件已关闭");
         }
 

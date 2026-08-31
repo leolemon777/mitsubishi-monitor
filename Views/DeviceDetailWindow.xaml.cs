@@ -1,8 +1,5 @@
 using System;
 using System.Windows;
-using System.Windows.Media;
-using LiveCharts;
-using LiveCharts.Wpf;
 using MitsubishiMonitor.Demo.Models;
 using MitsubishiMonitor.Demo.ViewModels;
 using MitsubishiMonitor.Demo.Services;
@@ -28,7 +25,17 @@ namespace MitsubishiMonitor.Demo.Views
                 _viewModel = new DeviceDetailViewModel(device, deviceManager);
                 DataContext = _viewModel;
 
-                BindChartData();
+                // 演示发布版在展示温度与工艺流程后，自动切换到原有 PLC 点位面板。
+                // 现场默认模式不执行任何自动滚动。
+                if (App.IsDemoVideoMode)
+                {
+                    Loaded += async (s, e) =>
+                    {
+                        await System.Threading.Tasks.Task.Delay(9000);
+                        if (IsVisible && PlcPointPanelHost != null)
+                            PlcPointPanelHost.BringIntoView();
+                    };
+                }
 
                 this.Closing += DeviceDetailWindow_Closing;
             }
@@ -38,35 +45,6 @@ namespace MitsubishiMonitor.Demo.Views
                     "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 throw;
             }
-        }
-
-        private void BindChartData()
-        {
-            if (_viewModel.HasVoltage)
-            {
-                CombinedChart.Series = _viewModel.CombinedSeries;
-                if (XAxis != null) XAxis.Labels = _viewModel.TimeLabels;
-            }
-            else
-            {
-                TempOnlyChart.Series = _viewModel.CombinedSeries;
-                if (XAxisNoVoltage != null) XAxisNoVoltage.Labels = _viewModel.TimeLabels;
-            }
-
-            _viewModel.PropertyChanged += (s, e) =>
-            {
-                if (e.PropertyName == nameof(_viewModel.TimeLabels))
-                {
-                    if (_viewModel.HasVoltage)
-                    {
-                        if (XAxis != null) XAxis.Labels = _viewModel.TimeLabels;
-                    }
-                    else
-                    {
-                        if (XAxisNoVoltage != null) XAxisNoVoltage.Labels = _viewModel.TimeLabels;
-                    }
-                }
-            };
         }
 
         private void DeviceDetailWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)

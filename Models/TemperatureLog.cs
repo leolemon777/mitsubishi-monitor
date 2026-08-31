@@ -53,9 +53,21 @@ namespace MitsubishiMonitor.Demo.Models
         public bool IsAbnormal { get; set; }
 
         /// <summary>
-        /// 异常阈值
+        /// 兼容老库的历史阈值列。新代码同时写入 AlarmThreshold，不再把 PLC 目标温度写入此字段。
         /// </summary>
-        public float Threshold { get; set; } = 50f;
+        public float Threshold { get; set; } = 90f;
+
+        /// <summary>本条温度用于报警判断的软件阈值。</summary>
+        public float AlarmThreshold { get; set; } = 90f;
+
+        /// <summary>PLC 最近一次有效目标温度；与报警阈值是两个独立概念。</summary>
+        public float TargetTemperature { get; set; }
+
+        /// <summary>三相电压等辅助遥测实际采样时间；为空表示历史库无此信息。</summary>
+        public DateTime? AuxiliarySampleTime { get; set; }
+
+        /// <summary>写入时辅助遥测是否满足本轮新鲜度要求。</summary>
+        public bool HasFreshAuxiliaryData { get; set; }
 
         /// <summary>
         /// 格式化的温度显示

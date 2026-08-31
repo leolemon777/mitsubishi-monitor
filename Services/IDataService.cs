@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using MitsubishiMonitor.Demo.Models;
 
@@ -13,71 +14,51 @@ namespace MitsubishiMonitor.Demo.Services
         /// <summary>
         /// 初始化数据库
         /// </summary>
-        Task InitializeAsync();
+        Task InitializeAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// 添加温度日志
+        /// 清理旧数据（超过 15 天）
         /// </summary>
-        Task AddTemperatureLogAsync(TemperatureLog log);
+        Task CleanOldDataAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// 添加操作日志
+        /// 获取单台或全部设备的操作日志分页；deviceId 为 null 表示全部设备。
         /// </summary>
-        Task AddOperationLogAsync(OperationLog log);
+        Task<List<OperationLog>> GetOperationLogsPagedAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            int pageIndex,
+            int pageSize,
+            CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// 获取指定时间范围的温度日志
+        /// 获取单台或全部设备的温度日志分页；返回页内按时间正序排列。
         /// </summary>
-        Task<List<TemperatureLog>> GetTemperatureLogsAsync(DateTime startTime, DateTime endTime);
+        Task<List<TemperatureLog>> GetTemperatureLogsPagedAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            int pageIndex,
+            int pageSize,
+            CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// 获取最近的温度日志 (用于曲线图)
-        /// </summary>
-        Task<List<TemperatureLog>> GetRecentTemperatureLogsAsync(int count = 100);
+        Task<int> GetOperationLogCountAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// 获取最近的操作日志
-        /// </summary>
-        Task<List<OperationLog>> GetRecentOperationLogsAsync(int count = 50);
+        Task<int> GetTemperatureLogCountAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default);
 
-        /// <summary>
-        /// 获取所有操作日志
-        /// </summary>
-        Task<List<OperationLog>> GetAllOperationLogsAsync();
-
-        /// <summary>
-        /// 清理旧数据 (超过15天)
-        /// </summary>
-        Task CleanOldDataAsync();
-
-        /// <summary>
-        /// 获取温度统计信息
-        /// </summary>
-        Task<(float min, float max, float avg)> GetTemperatureStatsAsync(DateTime? startTime = null);
-
-        /// <summary>
-        /// 获取指定设备的温度日志
-        /// </summary>
-        Task<List<TemperatureLog>> GetTemperatureLogsByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime);
-
-        /// <summary>
-        /// 获取指定设备的操作日志
-        /// </summary>
-        Task<List<OperationLog>> GetOperationLogsByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime);
-
-        /// <summary>
-        /// 获取指定设备最近的操作日志数量
-        /// </summary>
-        Task<int> GetOperationLogCountByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime);
-
-        /// <summary>
-        /// 获取指定设备的操作日志（分页）
-        /// </summary>
-        Task<List<OperationLog>> GetOperationLogsByDevicePagedAsync(int deviceId, DateTime startTime, DateTime endTime, int pageIndex, int pageSize);
-
-        /// <summary>
-        /// 获取指定设备的温度日志（分页）
-        /// </summary>
-        Task<List<TemperatureLog>> GetTemperatureLogsByDevicePagedAsync(int deviceId, DateTime startTime, DateTime endTime, int pageIndex, int pageSize);
+        Task<TemperatureStatistics> GetTemperatureStatisticsAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default);
     }
 }

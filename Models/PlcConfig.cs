@@ -1,8 +1,87 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
 namespace MitsubishiMonitor.Demo.Models
 {
+    public enum PlcRegisterDataType
+    {
+        Int16,
+        UInt16,
+        Int32
+    }
+
+    /// <summary>
+    /// 一个温度寄存器的完整解释规则。实际温度和目标温度必须分别定义，
+    /// 不能再隐式共享宽度和比例。
+    /// </summary>
+    public sealed class TemperatureRegisterDefinition
+    {
+        public string Address { get; set; } = "D12";
+        public PlcRegisterDataType DataType { get; set; } = PlcRegisterDataType.Int32;
+        public float Divisor { get; set; } = 10f;
+        public float MinimumValid { get; set; } = -100f;
+        public float MaximumValid { get; set; } = 500f;
+        public float MaximumStep { get; set; } = 200f;
+
+        public TemperatureRegisterDefinition Clone()
+            => new()
+            {
+                Address = Address,
+                DataType = DataType,
+                Divisor = Divisor,
+                MinimumValid = MinimumValid,
+                MaximumValid = MaximumValid,
+                MaximumStep = MaximumStep
+            };
+
+        public bool TryConvert(long rawValue, out float value, out string reason)
+        {
+            value = float.NaN;
+            reason = "";
+            if (string.IsNullOrWhiteSpace(Address))
+            {
+                reason = "温度寄存器地址为空";
+                return false;
+            }
+
+            if (!float.IsFinite(Divisor) || Divisor <= 0.000001f)
+            {
+                reason = "温度除数必须是正数";
+                return false;
+            }
+
+            if (!float.IsFinite(MinimumValid) || !float.IsFinite(MaximumValid) ||
+                MinimumValid > MaximumValid)
+            {
+                reason = "温度有效范围配置无效";
+                return false;
+            }
+
+            if ((!float.IsFinite(MaximumStep) && !float.IsPositiveInfinity(MaximumStep)) ||
+                MaximumStep < 0f)
+            {
+                reason = "温度单次变化上限配置无效";
+                return false;
+            }
+
+            value = rawValue / Divisor;
+            if (!float.IsFinite(value))
+            {
+                reason = "转换结果不是有限数值";
+                return false;
+            }
+
+            if (value < MinimumValid || value > MaximumValid)
+            {
+                reason = $"温度 {value:F3} 超出允许范围 [{MinimumValid:F3}, {MaximumValid:F3}]";
+                return false;
+            }
+
+            return true;
+        }
+    }
+
     /// <summary>
     /// M 点读取块定义（起始地址 + 数量）
     /// </summary>
@@ -130,6 +209,11 @@ namespace MitsubishiMonitor.Demo.Models
         public string TemperatureAddress { get; set; } = "D12";
 
         /// <summary>
+        /// 实际温度的完整寄存器解释。为空时从旧字段生成，兼容历史配置。
+        /// </summary>
+        public TemperatureRegisterDefinition ActualTemperatureDefinition { get; set; }
+
+        /// <summary>
         /// 温度寄存器是否为16位Word（false=默认读32位DINT，true=只读单个16位D寄存器）
         /// 设备2/默认为 false（D12+D13 组成DINT）
         /// 设备3等用单个D寄存器存温度的设备设为 true
@@ -162,9 +246,9 @@ namespace MitsubishiMonitor.Demo.Models
         public string TargetTemperatureAddress { get; set; } = "D210";
 
         /// <summary>
-        /// 钉钉机器人Webhook地址
+        /// 目标温度的完整寄存器解释。为空时从旧字段生成，兼容历史配置。
         /// </summary>
-        public string DingTalkWebhook { get; set; } = "";
+        public TemperatureRegisterDefinition TargetTemperatureDefinition { get; set; }
 
         /// <summary>
         /// M点起始地址 (辅助继电器) - 留作兼容，优先使用 MReadBlocks
@@ -244,6 +328,27 @@ namespace MitsubishiMonitor.Demo.Models
         /// 温度异常阈值
         /// </summary>
         public float TemperatureThreshold { get; set; } = 90f;
+
+        /// <summary>
+        /// 取得实际温度定义。旧版本只保存 TemperatureIsWord/Divisor，
+        /// 因此这里保留向后兼容的回退逻辑。
+        /// </summary>
+        public TemperatureRegisterDefinition ResolveActualTemperatureDefinition()
+            => (ActualTemperatureDefinition ?? new TemperatureRegisterDefinition
+            {
+                Address = TemperatureAddress,
+                DataType = TemperatureIsWord ? PlcRegisterDataType.Int16 : PlcRegisterDataType.Int32,
+                Divisor = TemperatureDivisor
+            }).Clone();
+
+        /// <summary>取得目标温度定义，默认沿用旧配置但与实际温度对象相互独立。</summary>
+        public TemperatureRegisterDefinition ResolveTargetTemperatureDefinition()
+            => (TargetTemperatureDefinition ?? new TemperatureRegisterDefinition
+            {
+                Address = TargetTemperatureAddress,
+                DataType = TemperatureIsWord ? PlcRegisterDataType.Int16 : PlcRegisterDataType.Int32,
+                Divisor = TemperatureDivisor
+            }).Clone();
 
         /// <summary>
         /// X点标签映射（地址 -> 中文名称）

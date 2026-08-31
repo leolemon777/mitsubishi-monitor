@@ -1,10 +1,13 @@
 using System;
 using System.IO.Ports;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Win32;
+using MitsubishiMonitor.Demo.Models;
 using MitsubishiMonitor.Demo.Services;
 
 namespace MitsubishiMonitor.Demo.Views
@@ -36,8 +39,51 @@ namespace MitsubishiMonitor.Demo.Views
             CurrentPathText.Text = AppConfig.DatabasePath;
             AutoExportPathTextBox.Text = AppConfig.AutoExportPath ?? "";
 
+            var modeSelectors = GetModeSelectors();
+            for (var index = 0; index < modeSelectors.Length; index++)
+            {
+                var mode = index < AppConfig.DeviceMonitoringModes.Length
+                    ? AppConfig.DeviceMonitoringModes[index]
+                    : DeviceMonitoringMode.AutoStandby;
+                SelectMonitoringMode(modeSelectors[index], mode);
+            }
+
             // 窗口打开时自动列出当前系统所有串口，不用先点检测
             RefreshPortList();
+        }
+
+        private ComboBox[] GetModeSelectors()
+            => new[]
+            {
+                Device1ModeComboBox,
+                Device2ModeComboBox,
+                Device3ModeComboBox,
+                Device4ModeComboBox
+            };
+
+        private static void SelectMonitoringMode(ComboBox comboBox, DeviceMonitoringMode mode)
+        {
+            foreach (var item in comboBox.Items)
+            {
+                if (item is ComboBoxItem comboBoxItem &&
+                    string.Equals(comboBoxItem.Tag?.ToString(), mode.ToString(), StringComparison.Ordinal))
+                {
+                    comboBox.SelectedItem = comboBoxItem;
+                    return;
+                }
+            }
+
+            comboBox.SelectedIndex = 0;
+        }
+
+        private static DeviceMonitoringMode ReadMonitoringMode(ComboBox comboBox)
+        {
+            if (comboBox.SelectedItem is ComboBoxItem selected &&
+                Enum.TryParse<DeviceMonitoringMode>(selected.Tag?.ToString(), out var mode) &&
+                Enum.IsDefined(mode))
+                return mode;
+
+            throw new InvalidOperationException("请选择有效的设备运行模式");
         }
 
         /// <summary>
@@ -96,18 +142,17 @@ namespace MitsubishiMonitor.Demo.Views
         /// </summary>
         private void BrowseAutoExportFolder_Click(object sender, RoutedEventArgs e)
         {
-            using var dialog = new System.Windows.Forms.FolderBrowserDialog
+            var dialog = new OpenFolderDialog
             {
-                Description = "选择自动导出 HTML 的目标文件夹",
-                ShowNewFolderButton = true
+                Title = "选择自动导出 HTML 的目标文件夹"
             };
 
             var currentPath = AutoExportPathTextBox.Text.Trim();
             if (!string.IsNullOrEmpty(currentPath) && System.IO.Directory.Exists(currentPath))
-                dialog.SelectedPath = currentPath;
+                dialog.InitialDirectory = currentPath;
 
-            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-                AutoExportPathTextBox.Text = dialog.SelectedPath;
+            if (dialog.ShowDialog() == true)
+                AutoExportPathTextBox.Text = dialog.FolderName;
         }
 
         /// <summary>
@@ -137,12 +182,32 @@ namespace MitsubishiMonitor.Demo.Views
                 }
             }
 
-            AppConfig.SaveDatabasePath(newPath);
-
-            // 保存自动导出路径，并立即生效
             var autoExportPath = AutoExportPathTextBox.Text.Trim();
-            AppConfig.SaveAutoExportPath(autoExportPath);
-            _deviceManager?.UpdateAutoExportPath(autoExportPath);
+            DeviceMonitoringMode[] monitoringModes;
+            try
+            {
+                monitoringModes = GetModeSelectors()
+                    .Select(ReadMonitoringMode)
+                    .ToArray();
+                AppConfig.SaveStorageSettings(newPath, autoExportPath, monitoringModes);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"配置保存失败，原运行配置保持不变：\n{ex.Message}",
+                    "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+
+            string runtimeWarning = null;
+            try
+            {
+                _deviceManager?.UpdateAutoExportPath(AppConfig.AutoExportPath);
+                _deviceManager?.ApplyMonitoringModes(AppConfig.DeviceMonitoringModes);
+            }
+            catch (Exception ex)
+            {
+                runtimeWarning = $"配置已经安全保存，但本次运行未能完全切换：{ex.Message}。请重启软件应用保存后的配置。";
+            }
 
             var dbMsg = string.IsNullOrEmpty(newPath)
                 ? "数据库路径：已恢复默认（重启生效）"
@@ -150,9 +215,18 @@ namespace MitsubishiMonitor.Demo.Views
             var exportMsg = string.IsNullOrEmpty(autoExportPath)
                 ? "自动导出：已关闭"
                 : $"自动导出文件夹：{autoExportPath}（已即刻生效）";
+            var modeMsg = runtimeWarning == null
+                ? "设备模式：已即刻生效"
+                : "设备模式：已保存（重启后完整生效）";
 
-            MessageBox.Show(dbMsg + "\n" + exportMsg,
-                "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
+            var resultMessage = dbMsg + "\n" + exportMsg + "\n" + modeMsg;
+            if (!string.IsNullOrEmpty(runtimeWarning))
+                resultMessage += "\n\n" + runtimeWarning;
+
+            MessageBox.Show(resultMessage,
+                runtimeWarning == null ? "保存成功" : "已保存，需重启",
+                MessageBoxButton.OK,
+                runtimeWarning == null ? MessageBoxImage.Information : MessageBoxImage.Warning);
 
             DialogResult = true;
             Close();
@@ -400,51 +474,33 @@ namespace MitsubishiMonitor.Demo.Views
         }
 
         /// <summary>
-        /// 安装驱动按钮：尝试启动程序目录下的 CH340 驱动安装程序
+        /// 驱动按钮：仅打开芯片厂商官方页面，不执行发布目录中来源/版本未知的 EXE。
         /// </summary>
         private void InstallDriver_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                // 在程序所在目录的 Drivers 子目录下查找驱动安装包
-                var exeDir = System.IO.Path.GetDirectoryName(
-                    System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
-                var driverPath = System.IO.Path.Combine(exeDir, "Drivers", "CH341SER.EXE");
+                const string officialDownloadUrl = "https://www.wch.cn/downloads/CH341SER_EXE.html";
+                var result = MessageBox.Show(
+                    "程序不会自动运行本地驱动安装包。\n\n" +
+                    "即将打开南京沁恒（WCH）官方下载页；请由管理员核对发布者/数字签名后手动安装。",
+                    "打开官方驱动页面",
+                    MessageBoxButton.OKCancel,
+                    MessageBoxImage.Information);
+                if (result != MessageBoxResult.OK)
+                    return;
 
-                if (System.IO.File.Exists(driverPath))
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
                 {
-                    // 以管理员权限运行驱动安装程序
-                    var psi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = driverPath,
-                        UseShellExecute = true,
-                        Verb = "runas"  // 请求管理员权限
-                    };
-                    System.Diagnostics.Process.Start(psi);
-                    TestResultText.Text = "驱动安装程序已启动，安装完成后请重新点击【检测】";
-                    TestResultText.Foreground = new SolidColorBrush(Color.FromRgb(0x00, 0xCC, 0x66));
-                }
-                else
-                {
-                    // 驱动文件不存在，提示用户手动获取
-                    var driversDir = System.IO.Path.Combine(exeDir, "Drivers");
-                    MessageBox.Show(
-                        $"未找到驱动文件：\n{driverPath}\n\n" +
-                        "请从以下途径获取 CH340 驱动：\n" +
-                        "1. 三色灯随附的驱动光盘/U盘\n" +
-                        "2. 官网下载：https://www.wch.cn/downloads/CH341SER_EXE.html\n\n" +
-                        $"下载后请将 CH341SER.EXE 放入：\n{driversDir}",
-                        "驱动文件缺失", MessageBoxButton.OK, MessageBoxImage.Information);
-
-                    // 尝试打开 Drivers 目录（如果不存在则创建）
-                    if (!System.IO.Directory.Exists(driversDir))
-                        System.IO.Directory.CreateDirectory(driversDir);
-                    System.Diagnostics.Process.Start("explorer.exe", driversDir);
-                }
+                    FileName = officialDownloadUrl,
+                    UseShellExecute = true
+                });
+                TestResultText.Text = "已打开 WCH 官方下载页；安装完成后请重新点击【检测】";
+                TestResultText.Foreground = new SolidColorBrush(Color.FromRgb(0x00, 0xCC, 0x66));
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"启动驱动安装程序失败：{ex.Message}",
+                MessageBox.Show($"打开官方驱动页面失败：{ex.Message}",
                     "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }

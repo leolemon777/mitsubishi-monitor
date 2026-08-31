@@ -17,6 +17,14 @@ namespace MitsubishiMonitor.Demo.Services
     {
         private readonly SerialPort _serialPort;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
+        private readonly object _stateQueueSync = new();
+        private readonly SemaphoreSlim _stateQueueSignal = new(0, 1);
+        private readonly CancellationTokenSource _stateQueueCts = new();
+        private Task _stateQueueTask;
+        private string _queuedState = "";
+        private bool _stateSignalPending;
+        private string _appliedState = "";
+        private int _disposed;
 
         private static readonly Dictionary<string, byte[]> Commands = new Dictionary<string, byte[]>
         {
@@ -35,6 +43,15 @@ namespace MitsubishiMonitor.Demo.Services
         public bool IsConnected => _serialPort?.IsOpen == true;
         public string PortName => _serialPort?.PortName ?? "";
         public string LastError { get; private set; } = "";
+        public string AppliedState => _appliedState;
+        public bool HasQueuedState
+        {
+            get
+            {
+                lock (_stateQueueSync)
+                    return !string.IsNullOrEmpty(_queuedState);
+            }
+        }
 
         public TowerLightService(string portName = null)
         {
@@ -156,7 +173,7 @@ namespace MitsubishiMonitor.Demo.Services
                     return "⚠️ 检测到 USB 三色灯硬件已插入，但系统缺少 CH340 驱动！\n\n"
                          + string.Join("\n\n", unrecognizedDevices)
                          + "\n\n解决方法：安装 CH340 驱动后重新检测。\n"
-                         + "驱动文件位于程序目录 Drivers\\CH341SER.EXE";
+                         + "请通过设置页打开 WCH 官方下载页面，并核对数字签名后手动安装。";
                 }
 
                 var unknownSearcher = new ManagementObjectSearcher(
@@ -180,7 +197,7 @@ namespace MitsubishiMonitor.Demo.Services
                 return "未检测到任何 USB 串口设备。\n请确认：\n"
                      + "  1. 三色灯 USB 线已插好\n"
                      + "  2. 工控机 USB 口供电正常\n"
-                     + "  3. 已安装 CH340 驱动（驱动文件：Drivers\\CH341SER.EXE）";
+                     + "  3. 已从 WCH 官方渠道安装并核验 CH340 驱动";
             }
             catch (Exception ex)
             {
@@ -205,7 +222,9 @@ namespace MitsubishiMonitor.Demo.Services
             }
         }
 
-        // 异步发送命令，使用 SemaphoreSlim 替代 lock，Task.Delay 替代 Thread.Sleep
+        // 异步发送命令。即使调用方是 WPF Dispatcher，也必须把同步 SerialPort
+        // Open/Write/Read 放入后台线程；ConfigureAwait(false) 只影响 await 之后，
+        // 不能解决 await 之前已同步完成的锁和串口操作。
         public async Task<bool> SendAsync(string commandName)
         {
             if (!Commands.TryGetValue(commandName, out var command))
@@ -217,21 +236,8 @@ namespace MitsubishiMonitor.Demo.Services
             await _sendLock.WaitAsync().ConfigureAwait(false);
             try
             {
-                if (!_serialPort.IsOpen)
-                    _serialPort.Open();
-
-                _serialPort.DiscardInBuffer();
-                _serialPort.Write(command, 0, command.Length);
-                await Task.Delay(100).ConfigureAwait(false);
-
-                var count = _serialPort.BytesToRead;
-                if (count > 0)
-                {
-                    var response = new byte[count];
-                    _serialPort.Read(response, 0, count);
-                }
-
-                return true;
+                return await Task.Run(() => SendCore(command), CancellationToken.None)
+                    .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -242,6 +248,129 @@ namespace MitsubishiMonitor.Demo.Services
             finally
             {
                 _sendLock.Release();
+            }
+        }
+
+        private bool SendCore(byte[] command)
+        {
+            if (!_serialPort.IsOpen)
+                _serialPort.Open();
+
+            _serialPort.DiscardInBuffer();
+            _serialPort.Write(command, 0, command.Length);
+            Thread.Sleep(100);
+
+            var count = _serialPort.BytesToRead;
+            if (count > 0)
+            {
+                var response = new byte[count];
+                _serialPort.Read(response, 0, count);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 提交期望灯状态，采用“最新状态覆盖旧状态”队列。
+        /// 调用方只入队，串口工作由专用后台泵执行，避免 UI/监控线程阻塞。
+        /// </summary>
+        public void QueueDesiredState(string desiredState)
+        {
+            if (string.IsNullOrWhiteSpace(desiredState))
+                return;
+
+            if (!Enum.TryParse<TowerLightDecision>(desiredState, out _))
+                return;
+
+            var signal = false;
+            lock (_stateQueueSync)
+            {
+                if (Volatile.Read(ref _disposed) == 1)
+                    return;
+
+                _queuedState = desiredState;
+                if (!_stateSignalPending)
+                {
+                    _stateSignalPending = true;
+                    signal = true;
+                }
+
+                _stateQueueTask ??= Task.Run(ProcessStateQueueAsync);
+            }
+
+            if (signal)
+                _stateQueueSignal.Release();
+        }
+
+        private async Task ProcessStateQueueAsync()
+        {
+            try
+            {
+                while (!_stateQueueCts.IsCancellationRequested)
+                {
+                    await _stateQueueSignal.WaitAsync(_stateQueueCts.Token).ConfigureAwait(false);
+                    string desired;
+                    lock (_stateQueueSync)
+                    {
+                        desired = _queuedState;
+                        _queuedState = "";
+                        _stateSignalPending = false;
+                    }
+
+                    if (string.IsNullOrEmpty(desired) ||
+                        string.Equals(desired, _appliedState, StringComparison.Ordinal))
+                        continue;
+
+                    var ok = await SendDesiredStateAsync(desired).ConfigureAwait(false);
+                    if (ok)
+                    {
+                        _appliedState = desired;
+                        continue;
+                    }
+
+                    // 驱动/USB 瞬断时保留最新期望状态，稍后只重试最新值，
+                    // 不把已经过时的红/黄/绿命令排队堆积。
+                    lock (_stateQueueSync)
+                    {
+                        if (string.IsNullOrEmpty(_queuedState))
+                            _queuedState = desired;
+                        if (!_stateSignalPending)
+                        {
+                            _stateSignalPending = true;
+                            _stateQueueSignal.Release();
+                        }
+                    }
+                    await Task.Delay(1000, _stateQueueCts.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (_stateQueueCts.IsCancellationRequested)
+            {
+            }
+            catch (Exception ex)
+            {
+                LastError = "三色灯状态泵异常: " + ex.Message;
+                System.Diagnostics.Debug.WriteLine("[三色灯] " + LastError);
+            }
+        }
+
+        private async Task<bool> SendDesiredStateAsync(string desiredState)
+        {
+            switch (desiredState)
+            {
+                case nameof(TowerLightDecision.RedBuzzerOn):
+                    return await SendAsync("Red").ConfigureAwait(false) &
+                           await SendAsync("BuzzerOn").ConfigureAwait(false);
+                case nameof(TowerLightDecision.RedBuzzerOff):
+                    return await SendAsync("Red").ConfigureAwait(false) &
+                           await SendAsync("BuzzerOff").ConfigureAwait(false);
+                case nameof(TowerLightDecision.Green):
+                    return await SendAsync("Green").ConfigureAwait(false) &
+                           await SendAsync("BuzzerOff").ConfigureAwait(false);
+                case nameof(TowerLightDecision.Yellow):
+                    return await SendAsync("Yellow").ConfigureAwait(false) &
+                           await SendAsync("BuzzerOff").ConfigureAwait(false);
+                default:
+                    return await SendAsync("Off").ConfigureAwait(false);
             }
         }
 
@@ -285,14 +414,24 @@ namespace MitsubishiMonitor.Demo.Services
 
         public void Dispose()
         {
-            try { TurnOff(); } catch { }
-            try
+            if (Interlocked.Exchange(ref _disposed, 1) == 1)
+                return;
+            _stateQueueCts.Cancel();
+            // Dispose 可能由 WPF Dispatcher 调用，关闭串口也必须异步完成。
+            // 先尝试下发 Off，再释放驱动；调用方不需要等待 USB 驱动返回。
+            _ = Task.Run(async () =>
             {
-                if (_serialPort?.IsOpen == true)
-                    _serialPort.Close();
-                _serialPort?.Dispose();
-            }
-            catch { }
+                try { await SendAsync("Off").ConfigureAwait(false); } catch { }
+                try
+                {
+                    if (_serialPort?.IsOpen == true)
+                        _serialPort.Close();
+                    _serialPort?.Dispose();
+                }
+                catch { }
+            });
+            // 不同步 Dispose 这些信号量：队列中的最后一个后台串口任务可能仍在
+            // finally 中释放 _sendLock。它们随服务对象回收，避免退出路径抛出二次异常。
         }
 
         private static byte[] FromHex(string hex)

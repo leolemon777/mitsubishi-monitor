@@ -18,7 +18,7 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 dotnet run
 ```
 
-No test projects exist. No linter configured.
+Tests live in `Tests/MitsubishiMonitor.Demo.Tests` and run with `dotnet test`. No separate linter is configured.
 
 ## Architecture
 
@@ -39,7 +39,7 @@ PLC (MC Protocol 1E Frame)
 
 - **`Models/PlcConfig.cs`** — Per-device PLC configuration: IP, addresses, I/O labels, M-read blocks, polling intervals. Device 1 and 3 have hardcoded custom configs in `DeviceManagerService.CreateDevice1Config()` / `CreateDevice3Config()`. Other devices use default `PlcConfig`.
 - **`Services/MitsubishiPlcService.cs`** — Core PLC communication. Two timers: XY interval (1s) for I/O polling, Temperature interval (10s). Compares previous/current values to detect state changes → fires `StateChanged` event. Mitsubishi octal addressing handled by `PlcConfig.GetXAddress()`/`GetYAddress()`.
-- **`Services/DeviceManagerService.cs`** — Creates 4 `Device` + `MitsubishiPlcService` pairs. Subscribes to state changes → queues operation logs via `LogBufferService`. 5s monitor timer detects offline/online transitions → DingTalk alerts.
+- **`Services/DeviceManagerService.cs`** — Creates 4 `Device` + `MitsubishiPlcService` pairs. Subscribes to state changes → queues operation logs via `LogBufferService`. A 5s monitor timer detects online/fresh/stale/offline transitions and drives the local UI/tower-light policy.
 - **`Services/LogBufferService.cs`** — Batch-writes logs to SQLite via `ConcurrentQueue` every 3 seconds. Prevents DB contention from high-frequency state changes.
 - **`Data/MonitorDbContext.cs`** — EF Core SQLite context. Tables: `TemperatureLogs`, `OperationLogs`. Auto-cleanup: records older than 15 days deleted hourly.
 
@@ -64,10 +64,10 @@ PLC (MC Protocol 1E Frame)
 |-----------|---------|
 | MVVM | CommunityToolkit.Mvvm 8.4 (source generators) |
 | PLC Communication | HslCommunication 12.3 (MelsecA1ENet) |
-| Charts | LiveCharts.Wpf 0.9.7 |
+| Charts | LiveChartsCore.SkiaSharpView.WPF 2.0.5 |
 | Database | EF Core 8 + SQLite |
-| Excel Export | EPPlus 7.5 |
-| Alerts | DingTalk robot webhooks |
+| Excel Export | ClosedXML 0.105.1 (MIT) |
+| Alerts | Local UI + USB tower light (external webhook alerting is not configured) |
 
 ### Important Patterns
 
@@ -75,11 +75,11 @@ PLC (MC Protocol 1E Frame)
 - **`PlcConfig.MReadBlocks`** — M points are scattered (e.g., M1-M6 then M102-M103), read as separate contiguous blocks then merged into a single `bool[]`.
 - **LogBufferService write-behind** — `ConcurrentQueue` + 3-second batch flush prevents SQLite write contention from 4 PLCs' high-frequency state changes. `Dispose()` synchronously flushes remaining entries.
 - **SSR fault detection** — Heuristic in `MitsubishiPlcService`: if avg thermocouple voltage > 0.1V, PID output (Y17) is off, and temp exceeds target + 5, flags `IsSsrFault`.
-- **UI event throttling** — `DeviceDetailViewModel.OnPlcStateChanged()` buffers events in `_pendingLogs`, flushes to UI every 500ms.
+- **UI event throttling** — `DeviceDetailViewModel.OnPlcStateChanged()` only increments a pending counter; the UI applies batched count changes instead of materializing per-event rows.
 - **PlcStatus manual INPC** — Implements `INotifyPropertyChanged` directly (not CommunityToolkit) because setting the X/Y/M arrays fires individual property notifications (X0, X1, ..., Y0, ...) for per-point WPF binding.
-- **Dual ViewModels** — `MainViewModel` is legacy single-device code; active app uses `DeviceListViewModel` (multi-device). Both exist in the codebase.
-- No DI container — `Microsoft.Extensions.DependencyInjection` is in csproj but unused. All services manually constructed in constructors.
-- All device config is hardcoded (no appsettings.json). Device 1/3 have custom configs via `CreateDevice1Config()`/`CreateDevice3Config()` in `DeviceManagerService`.
+- **Active ViewModel** — The dashboard uses `DeviceListViewModel` (multi-device). The obsolete single-device `MainViewModel` has been removed to prevent duplicate PLC sessions and timers.
+- No DI container — services are manually constructed in constructors; unused DI/Hosting package references were removed.
+- PLC point maps remain code-defined. IPs, alarm thresholds, database path, and auxiliary export path are validated and persisted through `config.json`; device 1/3 keep custom point maps in `CreateDevice1Config()`/`CreateDevice3Config()`.
 - `nullable disable` — project-wide nullable is disabled. Don't add nullable reference type annotations.
 
 ### Namespace

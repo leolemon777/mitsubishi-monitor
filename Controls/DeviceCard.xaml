@@ -46,24 +46,9 @@
         </Border.RenderTransform>
         
         <Grid>
-            <!-- 扫描线效果 -->
+            <!-- 静态顶部装饰线：避免每张设备卡常驻一个无限循环动画时钟。 -->
             <Border Height="2" VerticalAlignment="Top"
-                    Background="{StaticResource TechGradient}" Opacity="0.3"
-                    RenderTransformOrigin="0.5,0">
-                <Border.RenderTransform>
-                    <TranslateTransform Y="0"/>
-                </Border.RenderTransform>
-                <Border.Triggers>
-                    <EventTrigger RoutedEvent="Border.Loaded">
-                        <BeginStoryboard>
-                            <Storyboard RepeatBehavior="Forever">
-                                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)"
-                                               From="0" To="220" Duration="0:0:3"/>
-                            </Storyboard>
-                        </BeginStoryboard>
-                    </EventTrigger>
-                </Border.Triggers>
-            </Border>
+                    Background="{StaticResource TechGradient}" Opacity="0.3"/>
 
             <!-- 卡片边框装饰 -->
             <Border BorderBrush="{StaticResource TechGradient}" BorderThickness="0,0,0,2"
@@ -96,7 +81,7 @@
                     </StackPanel>
 
                     <!-- 连接/断开按钮 -->
-                    <Button Grid.Column="1" Content="连接" FontSize="10" Padding="10,4" Margin="0,0,8,0"
+                    <Button Grid.Column="1" Content="启用/连接" FontSize="10" Padding="10,4" Margin="0,0,8,0"
                             Command="{Binding ConnectCommand}"
                             CommandParameter="{Binding DataContext, RelativeSource={RelativeSource AncestorType=UserControl}}"
                             Visibility="{Binding IsOnline, Converter={StaticResource InverseBoolToVisibilityConverter}}"
@@ -127,7 +112,7 @@
                             </Style>
                         </Button.Style>
                     </Button>
-                    <Button Grid.Column="1" Content="断开" FontSize="10" Padding="10,4" Margin="0,0,8,0"
+                    <Button Grid.Column="1" Content="停用" FontSize="10" Padding="10,4" Margin="0,0,8,0"
                             Command="{Binding DisconnectCommand}"
                             CommandParameter="{Binding DataContext, RelativeSource={RelativeSource AncestorType=UserControl}}"
                             Visibility="{Binding IsOnline, Converter={StaticResource BooleanToVisibilityConverter}}"
@@ -251,6 +236,8 @@
                                 </Style>
                             </TextBlock.Style>
                         </TextBlock>
+                        <TextBlock Text="{Binding LastValidTemperatureDisplay}" FontSize="10" Foreground="#7D8590" Margin="0,4,0,0" FontFamily="Consolas"/>
+                        <TextBlock Text="{Binding TemperatureFreshnessDisplay}" FontSize="10" Foreground="#7D8590" Margin="0,2,0,0" FontFamily="Consolas"/>
                     </StackPanel>
 
                     <!-- 分隔线 -->
@@ -287,6 +274,9 @@
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="#3A4A5A" FontFamily="Consolas" Margin="16,0,0,0">
                             <Run Text="UPDATE:"/><Run Text="{Binding LastUpdateTime, StringFormat='{}{0:HH:mm:ss}'}" Foreground="#4A5568"/>
+                        </TextBlock>
+                        <TextBlock FontSize="10" Foreground="#3A4A5A" FontFamily="Consolas" Margin="16,0,0,0">
+                            <Run Text="MODE:"/><Run Text="{Binding MonitoringModeDisplay}" Foreground="#5A8FB8"/>
                         </TextBlock>
                     </StackPanel>
 

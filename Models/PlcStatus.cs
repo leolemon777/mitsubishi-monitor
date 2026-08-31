@@ -22,6 +22,12 @@ namespace MitsubishiMonitor.Demo.Models
         private bool _isConnected;
         private DateTime _lastUpdateTime;
         private DateTime _lastTemperatureSampleTime;
+        private long _lastTemperatureSampleSequence;
+        private long _lastTemperatureConnectionGeneration;
+        private long _lastTemperatureRawValue;
+        private TemperatureSampleQuality _temperatureQuality;
+        private string _lastTemperatureQualityReason = "";
+        private DateTime _lastAuxiliarySampleTime;
         private bool _isAlarm;
         private bool _isSsrFault;
         private Dictionary<string, int> _cValues = new();
@@ -51,8 +57,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _x;
             set
             {
+                value ??= new bool[_x?.Length ?? 0];
                 // 内容未变则跳过所有通知，避免每秒向 Dispatcher 队列灌入无用消息
-                if (value != null && _x != null && value.Length == _x.Length && value.SequenceEqual(_x))
+                if (_x != null && value.Length == _x.Length && value.SequenceEqual(_x))
                     return;
                 _x = value;
                 OnPropertyChanged();
@@ -89,8 +96,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _y;
             set
             {
+                value ??= new bool[_y?.Length ?? 0];
                 // 内容未变则跳过所有通知
-                if (value != null && _y != null && value.Length == _y.Length && value.SequenceEqual(_y))
+                if (_y != null && value.Length == _y.Length && value.SequenceEqual(_y))
                     return;
                 _y = value;
                 OnPropertyChanged();
@@ -133,8 +141,9 @@ namespace MitsubishiMonitor.Demo.Models
             get => _m;
             set
             {
+                value ??= new bool[_m?.Length ?? 0];
                 // 内容未变则跳过所有通知
-                if (value != null && _m != null && value.Length == _m.Length && value.SequenceEqual(_m))
+                if (_m != null && value.Length == _m.Length && value.SequenceEqual(_m))
                     return;
                 _m = value;
                 OnPropertyChanged();
@@ -290,6 +299,73 @@ namespace MitsubishiMonitor.Demo.Models
             set
             {
                 _lastTemperatureSampleTime = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>当前温度样本在本进程内的单调序号。</summary>
+        public long LastTemperatureSampleSequence
+        {
+            get => _lastTemperatureSampleSequence;
+            set
+            {
+                _lastTemperatureSampleSequence = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>产生当前温度样本的 PLC 连接代。</summary>
+        public long LastTemperatureConnectionGeneration
+        {
+            get => _lastTemperatureConnectionGeneration;
+            set
+            {
+                _lastTemperatureConnectionGeneration = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>当前温度对应的原始寄存器值，便于现场校对 HMI。</summary>
+        public long LastTemperatureRawValue
+        {
+            get => _lastTemperatureRawValue;
+            set
+            {
+                _lastTemperatureRawValue = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public TemperatureSampleQuality TemperatureQuality
+        {
+            get => _temperatureQuality;
+            set
+            {
+                _temperatureQuality = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string LastTemperatureQualityReason
+        {
+            get => _lastTemperatureQualityReason;
+            set
+            {
+                _lastTemperatureQualityReason = value ?? "";
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// 目标温度、热电偶电压和辅助寄存器最近一次整轮成功提交的时间。
+        /// 与主温度采样时间分开，避免把旧辅助值伪装成本轮数据。
+        /// </summary>
+        public DateTime LastAuxiliarySampleTime
+        {
+            get => _lastAuxiliarySampleTime;
+            set
+            {
+                _lastAuxiliarySampleTime = value;
                 OnPropertyChanged();
             }
         }

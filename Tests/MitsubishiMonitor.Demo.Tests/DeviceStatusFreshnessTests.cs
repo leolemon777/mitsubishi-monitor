@@ -9,6 +9,31 @@ namespace MitsubishiMonitor.Demo.Tests
     public class DeviceStatusFreshnessTests
     {
         [Fact]
+        public void AutoStandbyAndDisabled_HideHistoricalTemperature_AndUseDistinctStatus()
+        {
+            var device = new Device
+            {
+                MonitoringMode = DeviceMonitoringMode.AutoStandby,
+                IsOnline = false,
+                HasTemperatureSample = true,
+                CurrentTemperature = 26.5f,
+                IsTemperatureStale = true
+            };
+
+            Assert.Equal(DeviceRuntimeState.Standby, device.RuntimeState);
+            Assert.Equal("待机 · 等待开机", device.StatusDisplay);
+            Assert.Equal("--.-°C", device.TemperatureDisplay);
+
+            device.IsReconnecting = true;
+            Assert.Equal("待机 · 正在探测", device.StatusDisplay);
+
+            device.MonitoringMode = DeviceMonitoringMode.Disabled;
+            Assert.Equal(DeviceRuntimeState.Disabled, device.RuntimeState);
+            Assert.Equal("已停用", device.StatusDisplay);
+            Assert.Equal("--.-°C", device.TemperatureDisplay);
+        }
+
+        [Fact]
         public async Task ManualRefresh_DoesNotPresentPreviousGenerationTemperatureAsFresh()
         {
             var oldSampleTime = DateTime.Now.AddMinutes(-2);
@@ -33,7 +58,9 @@ namespace MitsubishiMonitor.Demo.Tests
             Assert.True(device.IsTemperatureStale);
             Assert.Equal(25f, device.CurrentTemperature);
             Assert.Equal(oldSampleTime, device.LastUpdateTime);
-            Assert.Contains("⚠", device.TemperatureDisplay);
+            Assert.Equal("--.-°C", device.TemperatureDisplay);
+            Assert.Equal("最后有效 25.0°C", device.LastValidTemperatureDisplay);
+            Assert.Contains("数据已过期", device.TemperatureFreshnessDisplay);
         }
 
         [Fact]
@@ -71,6 +98,13 @@ namespace MitsubishiMonitor.Demo.Tests
                 add { }
                 remove { }
             }
+            public event EventHandler<PlcConnectionChangedEventArgs> ConnectionStateChangedDetailed
+            {
+                add { }
+                remove { }
+            }
+            public PlcConnectionSnapshot ConnectionSnapshot { get; } =
+                new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "测试", 0, null, null, null);
             public event EventHandler<StateChangeEvent> StateChanged
             {
                 add { }

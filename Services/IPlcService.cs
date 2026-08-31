@@ -25,6 +25,14 @@ namespace MitsubishiMonitor.Demo.Services
         event EventHandler<bool> ConnectionStateChanged;
 
         /// <summary>
+        /// 结构化连接状态。新代码应使用它区分 TCP 建立、MC 验证和数据新鲜度。
+        /// </summary>
+        event EventHandler<PlcConnectionChangedEventArgs> ConnectionStateChangedDetailed;
+
+        /// <summary>当前连接生命周期快照。</summary>
+        PlcConnectionSnapshot ConnectionSnapshot { get; }
+
+        /// <summary>
         /// X/Y点状态变化事件
         /// </summary>
         event EventHandler<StateChangeEvent> StateChanged;

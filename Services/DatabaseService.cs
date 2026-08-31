@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using MitsubishiMonitor.Demo.Data;
@@ -9,252 +12,233 @@ using MitsubishiMonitor.Demo.Models;
 namespace MitsubishiMonitor.Demo.Services
 {
     /// <summary>
-    /// 数据库服务实现
-    /// 每次方法调用都新建一个短生命周期 DbContext，并用 AsNoTracking 进行只读查询，
-    /// 避免长生命周期上下文的实体跟踪膨胀（程序长期运行时内存暴涨）和并发访问异常。
+    /// 短生命周期 DbContext 数据服务。初始化任务按数据库绝对路径隔离，所有查询都支持
+    /// CancellationToken，分页排序包含主键作为稳定的次级键。
     /// </summary>
-    public class DataService : IDataService, IDisposable
+    public sealed class DataService : IDataService, IDisposable
     {
-        /// <summary>
-        /// DB 是否已初始化（静态，进程生命周期内只执行一次 EnsureCreated + PRAGMA + schema 升级）
-        /// </summary>
-        private static volatile bool _initialized = false;
-        private static readonly object _initLock = new();
-        private static Task _initializeTask;
+        private static readonly ConcurrentDictionary<string, Lazy<Task>> InitializationTasks =
+            new(StringComparer.OrdinalIgnoreCase);
 
-        public DataService()
+        private readonly string _databasePath;
+
+        public DataService() : this(AppConfig.DatabasePath)
         {
         }
 
-        /// <summary>
-        /// 初始化数据库：EnsureCreated + PRAGMA + 表结构升级。
-        /// 内部用静态锁保证全局只执行一次，外部可多次安全调用。
-        /// </summary>
-        public async Task InitializeAsync()
+        internal DataService(string databasePath)
         {
-            if (_initialized) return;
+            if (string.IsNullOrWhiteSpace(databasePath))
+                throw new ArgumentException("数据库路径不能为空", nameof(databasePath));
+            _databasePath = Path.GetFullPath(databasePath);
+        }
 
-            Task initTask;
-            lock (_initLock)
-            {
-                if (_initialized) return;
-                _initializeTask ??= InitializeCoreAsync();
-                initTask = _initializeTask;
-            }
+        public async Task InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            var lazy = InitializationTasks.GetOrAdd(
+                _databasePath,
+                path => new Lazy<Task>(
+                    () => InitializeCoreAsync(path),
+                    LazyThreadSafetyMode.ExecutionAndPublication));
 
             try
             {
-                await initTask;
+                await lazy.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 只取消当前等待者；共享初始化仍继续，不能从字典移除并并发启动第二次迁移。
+                throw;
             }
             catch
             {
-                lock (_initLock)
+                if (InitializationTasks.TryGetValue(_databasePath, out var current) &&
+                    ReferenceEquals(current, lazy))
                 {
-                    if (ReferenceEquals(_initializeTask, initTask))
-                        _initializeTask = null;
-                    _initialized = false;
+                    InitializationTasks.TryRemove(_databasePath, out _);
                 }
                 throw;
             }
         }
 
-        private static async Task InitializeCoreAsync()
+        private static async Task InitializeCoreAsync(string databasePath)
         {
-            using var ctx = new MonitorDbContext();
-            await ctx.Database.EnsureCreatedAsync();
+            using var context = new MonitorDbContext(databasePath);
+            await context.Database.EnsureCreatedAsync().ConfigureAwait(false);
 
-            // 启用 WAL 日志模式 + 适度同步级别，缓解 4 路 PLC 高频写入时的锁竞争
-            try
-            {
-                await ctx.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;");
-                await ctx.Database.ExecuteSqlRawAsync("PRAGMA synchronous=NORMAL;");
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[DB] 设置 PRAGMA 失败: {ex.Message}");
-            }
+            // WAL、同步级别和结构升级均是权威日志可用的前置条件，任何失败都向上抛出。
+            await context.Database.ExecuteSqlRawAsync("PRAGMA journal_mode=WAL;").ConfigureAwait(false);
+            await context.Database.ExecuteSqlRawAsync("PRAGMA synchronous=NORMAL;").ConfigureAwait(false);
+            context.EnsureSchemaUpgraded();
+            await context.Database.ExecuteSqlRawAsync("SELECT 1;").ConfigureAwait(false);
 
-            // 老库无痛升级：补齐 DeviceName / PointLabel 列（已有列会被跳过）
-            try
-            {
-                ctx.EnsureSchemaUpgraded();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[DB] 表结构升级失败: {ex.Message}");
-            }
-
-            _initialized = true;
-            System.Diagnostics.Debug.WriteLine("[DB] InitializeAsync 完成（全局仅此一次）");
+            System.Diagnostics.Debug.WriteLine($"[DB] 初始化完成：{databasePath}");
         }
 
-        public async Task AddTemperatureLogAsync(TemperatureLog log)
+        public async Task CleanOldDataAsync(CancellationToken cancellationToken = default)
         {
-            try
-            {
-                using var ctx = new MonitorDbContext();
-                ctx.TemperatureLogs.Add(log);
-                await ctx.SaveChangesAsync();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"添加温度日志失败: {ex.Message}");
-            }
+            var cutoffDate = DateTime.Now.AddDays(-15);
+            using var context = CreateContext();
+            var temperatureDeleted = await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM TemperatureLog WHERE RecordTime < {0}",
+                new object[] { cutoffDate },
+                cancellationToken).ConfigureAwait(false);
+            var operationDeleted = await context.Database.ExecuteSqlRawAsync(
+                "DELETE FROM OperationLog WHERE LogTime < {0}",
+                new object[] { cutoffDate },
+                cancellationToken).ConfigureAwait(false);
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[数据清理] 删除温度 {temperatureDeleted} 条、操作 {operationDeleted} 条，保留 15 天");
         }
 
-        public async Task AddOperationLogAsync(OperationLog log)
+        public async Task<List<OperationLog>> GetOperationLogsPagedAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            int pageIndex,
+            int pageSize,
+            CancellationToken cancellationToken = default)
         {
-            try
-            {
-                using var ctx = new MonitorDbContext();
-                ctx.OperationLogs.Add(log);
-                await ctx.SaveChangesAsync();
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"添加操作日志失败: {ex.Message}");
-            }
-        }
-
-        public async Task<List<TemperatureLog>> GetTemperatureLogsAsync(DateTime startTime, DateTime endTime)
-        {
-            using var ctx = new MonitorDbContext();
-            return await ctx.TemperatureLogs
+            ValidateRange(startTime, endTime);
+            ValidateDeviceId(deviceId);
+            ValidatePage(pageIndex, pageSize);
+            using var context = CreateContext();
+            var query = context.OperationLogs
                 .AsNoTracking()
-                .Where(l => l.RecordTime >= startTime && l.RecordTime <= endTime)
-                .OrderBy(l => l.RecordTime)
-                .ToListAsync();
+                .Where(log => log.LogTime >= startTime && log.LogTime <= endTime);
+            if (deviceId.HasValue)
+                query = query.Where(log => log.DeviceId == deviceId.Value);
+
+            var ordered = query
+                .OrderByDescending(log => log.LogTime)
+                .ThenByDescending(log => log.Id);
+            var skip = checked(pageIndex * pageSize);
+            return await ordered.Skip(skip).Take(pageSize)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        public async Task<List<TemperatureLog>> GetRecentTemperatureLogsAsync(int count = 100)
+        public async Task<List<TemperatureLog>> GetTemperatureLogsPagedAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            int pageIndex,
+            int pageSize,
+            CancellationToken cancellationToken = default)
         {
-            using var ctx = new MonitorDbContext();
-            return await ctx.TemperatureLogs
+            ValidateRange(startTime, endTime);
+            ValidateDeviceId(deviceId);
+            ValidatePage(pageIndex, pageSize);
+            using var context = CreateContext();
+            var query = context.TemperatureLogs
                 .AsNoTracking()
-                .OrderByDescending(l => l.RecordTime)
-                .Take(count)
-                .ToListAsync();
+                .Where(log => log.RecordTime >= startTime && log.RecordTime <= endTime);
+            if (deviceId.HasValue)
+                query = query.Where(log => log.DeviceId == deviceId.Value);
+
+            var ordered = query
+                .OrderByDescending(log => log.RecordTime)
+                .ThenByDescending(log => log.Id);
+            var skip = checked(pageIndex * pageSize);
+            var page = await ordered.Skip(skip).Take(pageSize)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            page.Reverse();
+            return page;
         }
 
-        public async Task<List<OperationLog>> GetRecentOperationLogsAsync(int count = 50)
+        public async Task<int> GetOperationLogCountAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default)
         {
-            using var ctx = new MonitorDbContext();
-            return await ctx.OperationLogs
+            ValidateRange(startTime, endTime);
+            ValidateDeviceId(deviceId);
+            using var context = CreateContext();
+            var query = context.OperationLogs
                 .AsNoTracking()
-                .OrderByDescending(l => l.LogTime)
-                .Take(count)
-                .ToListAsync();
+                .Where(log => log.LogTime >= startTime && log.LogTime <= endTime);
+            if (deviceId.HasValue)
+                query = query.Where(log => log.DeviceId == deviceId.Value);
+            return await query.CountAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task<List<OperationLog>> GetAllOperationLogsAsync()
+        public async Task<int> GetTemperatureLogCountAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default)
         {
-            using var ctx = new MonitorDbContext();
-            return await ctx.OperationLogs
+            ValidateRange(startTime, endTime);
+            ValidateDeviceId(deviceId);
+            using var context = CreateContext();
+            var query = context.TemperatureLogs
                 .AsNoTracking()
-                .OrderByDescending(l => l.LogTime)
-                .ToListAsync();
+                .Where(log => log.RecordTime >= startTime && log.RecordTime <= endTime);
+            if (deviceId.HasValue)
+                query = query.Where(log => log.DeviceId == deviceId.Value);
+            return await query.CountAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task CleanOldDataAsync()
+        public async Task<TemperatureStatistics> GetTemperatureStatisticsAsync(
+            int? deviceId,
+            DateTime startTime,
+            DateTime endTime,
+            CancellationToken cancellationToken = default)
         {
-            try
+            ValidateRange(startTime, endTime);
+            ValidateDeviceId(deviceId);
+            using var context = CreateContext();
+            var query = context.TemperatureLogs
+                .AsNoTracking()
+                .Where(log => log.RecordTime >= startTime && log.RecordTime <= endTime);
+            if (deviceId.HasValue)
+                query = query.Where(log => log.DeviceId == deviceId.Value);
+
+            return await ProjectStatistics(query)
+                .SingleOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false)
+                ?? new TemperatureStatistics();
+        }
+
+        private static IQueryable<TemperatureStatistics> ProjectStatistics(
+            IQueryable<TemperatureLog> query)
+            => query.GroupBy(_ => 1).Select(group => new TemperatureStatistics
             {
-                // 保留最近 30 天的数据（约 1 个月）
-                var cutoffDate = DateTime.Now.AddDays(-30);
+                Count = group.Count(),
+                AbnormalCount = group.Count(log => log.IsAbnormal),
+                Minimum = group.Min(log => log.Temperature),
+                Maximum = group.Max(log => log.Temperature),
+                Average = (float)group.Average(log => log.Temperature)
+            });
 
-                using var ctx = new MonitorDbContext();
+        private MonitorDbContext CreateContext() => new(_databasePath);
 
-                // 用 ExecuteSqlRaw 批量删，省去先 Load 再 Remove 的内存开销
-                var tempDeleted = await ctx.Database.ExecuteSqlRawAsync(
-                    "DELETE FROM TemperatureLog WHERE RecordTime < {0}", cutoffDate);
-                var opDeleted = await ctx.Database.ExecuteSqlRawAsync(
-                    "DELETE FROM OperationLog WHERE LogTime < {0}", cutoffDate);
-
-                System.Diagnostics.Debug.WriteLine(
-                    $"[数据清理] 删除温度日志 {tempDeleted} 条, 操作日志 {opDeleted} 条 (cutoff={cutoffDate:yyyy-MM-dd HH:mm:ss})");
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"清理旧数据失败: {ex.Message}");
-            }
+        private static void ValidateRange(DateTime startTime, DateTime endTime)
+        {
+            if (endTime < startTime)
+                throw new ArgumentException("结束时间不能早于开始时间");
         }
 
-        public async Task<(float min, float max, float avg)> GetTemperatureStatsAsync(DateTime? startTime = null)
+        private static void ValidateDeviceId(int? deviceId)
         {
-            using var ctx = new MonitorDbContext();
-            var query = ctx.TemperatureLogs.AsNoTracking().AsQueryable();
-
-            if (startTime.HasValue)
-            {
-                query = query.Where(l => l.RecordTime >= startTime.Value);
-            }
-
-            // 改为聚合下推到 SQL 层，避免 ToListAsync 把全表拉到内存
-            if (!await query.AnyAsync())
-                return (0, 0, 0);
-
-            var min = await query.MinAsync(l => l.Temperature);
-            var max = await query.MaxAsync(l => l.Temperature);
-            var avg = (float)await query.AverageAsync(l => l.Temperature);
-            return (min, max, avg);
+            if (deviceId.HasValue && deviceId.Value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(deviceId));
         }
 
-        public async Task<List<TemperatureLog>> GetTemperatureLogsByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime)
+        private static void ValidatePage(int pageIndex, int pageSize)
         {
-            using var ctx = new MonitorDbContext();
-            return await ctx.TemperatureLogs
-                .AsNoTracking()
-                .Where(l => l.DeviceId == deviceId && l.RecordTime >= startTime && l.RecordTime <= endTime)
-                .OrderBy(l => l.RecordTime)
-                .ToListAsync();
-        }
-
-        public async Task<List<OperationLog>> GetOperationLogsByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime)
-        {
-            using var ctx = new MonitorDbContext();
-            return await ctx.OperationLogs
-                .AsNoTracking()
-                .Where(l => l.DeviceId == deviceId && l.LogTime >= startTime && l.LogTime <= endTime)
-                .OrderByDescending(l => l.LogTime)
-                .ToListAsync();
-        }
-
-        public async Task<int> GetOperationLogCountByDeviceAsync(int deviceId, DateTime startTime, DateTime endTime)
-        {
-            using var ctx = new MonitorDbContext();
-            return await ctx.OperationLogs
-                .AsNoTracking()
-                .Where(l => l.DeviceId == deviceId && l.LogTime >= startTime && l.LogTime <= endTime)
-                .CountAsync();
-        }
-
-        public async Task<List<OperationLog>> GetOperationLogsByDevicePagedAsync(int deviceId, DateTime startTime, DateTime endTime, int pageIndex, int pageSize)
-        {
-            using var ctx = new MonitorDbContext();
-            return await ctx.OperationLogs
-                .AsNoTracking()
-                .Where(l => l.DeviceId == deviceId && l.LogTime >= startTime && l.LogTime <= endTime)
-                .OrderByDescending(l => l.LogTime)
-                .Skip(pageIndex * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
-        }
-
-        public async Task<List<TemperatureLog>> GetTemperatureLogsByDevicePagedAsync(int deviceId, DateTime startTime, DateTime endTime, int pageIndex, int pageSize)
-        {
-            using var ctx = new MonitorDbContext();
-            return await ctx.TemperatureLogs
-                .AsNoTracking()
-                .Where(l => l.DeviceId == deviceId && l.RecordTime >= startTime && l.RecordTime <= endTime)
-                .OrderBy(l => l.RecordTime)
-                .Skip(pageIndex * pageSize)
-                .Take(pageSize)
-                .ToListAsync();
+            if (pageIndex < 0)
+                throw new ArgumentOutOfRangeException(nameof(pageIndex));
+            if (pageSize <= 0 || pageSize > 10000)
+                throw new ArgumentOutOfRangeException(nameof(pageSize), "分页大小必须在 1～10000 之间");
         }
 
         public void Dispose()
         {
-            // 短生命周期上下文模式，无字段需要释放
+            // 短生命周期上下文模式，无字段资源需要释放。
         }
     }
 }

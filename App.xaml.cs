@@ -1,5 +1,7 @@
 using System.Threading;
+using System.Linq;
 using System.Windows;
+using MitsubishiMonitor.Demo.Services;
 using MitsubishiMonitor.Demo.ViewModels;
 using MitsubishiMonitor.Demo.Views;
 
@@ -8,6 +10,12 @@ namespace MitsubishiMonitor.Demo
     public partial class App : Application
     {
         private int _globalExceptionLoggingRegistered;
+        private SingleInstanceGuard _singleInstanceGuard;
+
+        /// <summary>
+        /// 视频演示模式只由显式命令行参数启用；生产包不会因目录中的普通文件误入演示状态。
+        /// </summary>
+        public static bool IsDemoVideoMode { get; private set; }
 
         /// <summary>
         /// HslCommunication 使用同步阻塞 API，4 路 PLC 加上数据库/串口任务可能暂时占用多个工作线程。
@@ -16,6 +24,22 @@ namespace MitsubishiMonitor.Demo
         /// </summary>
         protected override void OnStartup(StartupEventArgs e)
         {
+            IsDemoVideoMode = e.Args.Any(arg =>
+                string.Equals(arg, "--demo-video", System.StringComparison.OrdinalIgnoreCase));
+
+            if (!SingleInstanceGuard.TryAcquire(out _singleInstanceGuard, out var singleInstanceError))
+            {
+                var message = string.IsNullOrWhiteSpace(singleInstanceError)
+                    ? "监控程序已经在本机运行。为避免重复连接 PLC 和重复写入日志，本实例将退出。"
+                    : $"无法建立单实例保护，本实例已停止启动：\n{singleInstanceError}";
+                MessageBox.Show(message, "禁止重复运行", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Shutdown(1);
+                return;
+            }
+
+            if (IsDemoVideoMode)
+                AppConfig.EnableDemoIsolation();
+
             RegisterGlobalExceptionLogging();
 
             try
@@ -88,6 +112,8 @@ namespace MitsubishiMonitor.Demo
             {
                 System.Diagnostics.Debug.WriteLine($"[App] OnExit 清理异常: {ex.Message}");
             }
+            _singleInstanceGuard?.Dispose();
+            _singleInstanceGuard = null;
             base.OnExit(e);
         }
     }

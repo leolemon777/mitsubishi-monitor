@@ -449,7 +449,7 @@
                         <Button Content="📥 导出日志" Style="{StaticResource PrimaryBtn}"
                                 Command="{Binding ExportCommand}"/>
                         <TextBlock VerticalAlignment="Center" Margin="14,0,0,0" FontSize="12"
-                                   Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                   Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}">
                             <Run Text="● " Foreground="#00D4FF"/>
                             <Run Text="查询中…" Foreground="#B0BAC4"/>
                         </TextBlock>
@@ -514,7 +514,7 @@
                         </Border>
 
                         <Border Panel.ZIndex="2" Background="#DD0A0E17"
-                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}">
                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                 <TextBlock Text="正在查询数据…" Foreground="#00D4FF" FontSize="14" FontWeight="SemiBold"/>
                                 <TextBlock Text="请稍候" Foreground="#7D8590" FontSize="12" Margin="0,8,0,0" HorizontalAlignment="Center"/>
@@ -552,7 +552,7 @@
                         </Border>
 
                         <Border Panel.ZIndex="2" Background="#DD0A0E17"
-                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                Visibility="{Binding IsBusy, Converter={StaticResource BooleanToVisibilityConverter}}">
                             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                 <TextBlock Text="正在查询数据…" Foreground="#00D4FF" FontSize="14" FontWeight="SemiBold"/>
                                 <TextBlock Text="请稍候" Foreground="#7D8590" FontSize="12" Margin="0,8,0,0" HorizontalAlignment="Center"/>

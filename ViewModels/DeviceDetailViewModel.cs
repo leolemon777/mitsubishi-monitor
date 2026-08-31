@@ -5,14 +5,16 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Media;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using LiveCharts;
-using LiveCharts.Wpf;
+using LiveChartsCore;
+using LiveChartsCore.Measure;
+using LiveChartsCore.SkiaSharpView;
+using LiveChartsCore.SkiaSharpView.Painting;
 using MitsubishiMonitor.Demo.Models;
 using MitsubishiMonitor.Demo.Services;
+using SkiaSharp;
 
 namespace MitsubishiMonitor.Demo.ViewModels
 {
@@ -26,10 +28,10 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private readonly IPlcService _plcService;
         private readonly DispatcherTimer _plcUpdateTimer;
         private bool _isDisposed = false;
-        private readonly ChartValues<float> _phaseAValues = new();
-        private readonly ChartValues<float> _phaseBValues = new();
-        private readonly ChartValues<float> _phaseCValues = new();
-        private readonly ChartValues<float> _temperatureValuesForVoltageChart = new();
+        private readonly ObservableCollection<float> _phaseAValues = new();
+        private readonly ObservableCollection<float> _phaseBValues = new();
+        private readonly ObservableCollection<float> _phaseCValues = new();
+        private readonly ObservableCollection<float> _temperatureValuesForVoltageChart = new();
 
         private readonly Queue<float> _diagnosisTempHistory = new();
         private readonly Queue<float> _diagnosisVoltageHistory = new();
@@ -40,9 +42,10 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private const int DiagnosisWindowSamples = 6;
         private const int PredictionHorizonMinutes = 10;
         private DateTime _lastChartSampleTime;
-        private const int DetailQueryLimit = 5000;
         private int _pendingOperationDelta;
         private int _loadVersion;
+        private CancellationTokenSource _loadCts;
+        private CancellationTokenSource _exportCts;
 
         [ObservableProperty]
         private Device _currentDevice;
@@ -145,30 +148,39 @@ namespace MitsubishiMonitor.Demo.ViewModels
         /// 合并图表：温度 + A/B/C 三相电压（双Y轴）
         /// </summary>
         [ObservableProperty]
-        private SeriesCollection _combinedSeries;
+        private ISeries[] _combinedSeries = Array.Empty<ISeries>();
 
         [ObservableProperty]
         private string[] _timeLabels = Array.Empty<string>();
 
+        [ObservableProperty]
+        private Axis[] _xAxes = Array.Empty<Axis>();
+
+        [ObservableProperty]
+        private Axis[] _combinedYAxes = Array.Empty<Axis>();
+
+        [ObservableProperty]
+        private Axis[] _temperatureYAxes = Array.Empty<Axis>();
+
         /// <summary>
         /// 温度数据（直接绑定到图表）
         /// </summary>
-        public ChartValues<float> TemperatureValues => _temperatureValuesForVoltageChart;
+        public ObservableCollection<float> TemperatureValues => _temperatureValuesForVoltageChart;
 
         /// <summary>
         /// A相电压数据
         /// </summary>
-        public ChartValues<float> PhaseAValues => _phaseAValues;
+        public ObservableCollection<float> PhaseAValues => _phaseAValues;
 
         /// <summary>
         /// B相电压数据
         /// </summary>
-        public ChartValues<float> PhaseBValues => _phaseBValues;
+        public ObservableCollection<float> PhaseBValues => _phaseBValues;
 
         /// <summary>
         /// C相电压数据
         /// </summary>
-        public ChartValues<float> PhaseCValues => _phaseCValues;
+        public ObservableCollection<float> PhaseCValues => _phaseCValues;
 
         public DeviceDetailViewModel(Device device, DeviceManagerService deviceManager)
         {
@@ -241,23 +253,24 @@ namespace MitsubishiMonitor.Demo.ViewModels
             // 初始化图表
             InitializeCharts();
 
-            // 先显示空状态，再从数据库加载真实历史；生产监控界面不能生成随机温度数据。
+            // 先显示当前状态。现场模式继续从数据库加载真实历史；
+            // 视频演示模式只使用本次启动的内存数据，避免历史演示记录污染计数。
             InitializeDisplayData();
-            _ = LoadDataAsync();
+            if (!App.IsDemoVideoMode)
+                _ = LoadDataAsync();
         }
 
         private void InitializeCharts()
         {
-            var series = new SeriesCollection
+            var series = new List<ISeries>
             {
-                new LineSeries
+                new LineSeries<float>
                 {
-                    Title = "温度 (°C)",
+                    Name = "温度 (°C)",
                     Values = _temperatureValuesForVoltageChart,
-                    PointGeometry = null,
-                    Stroke = new SolidColorBrush(Color.FromRgb(240, 136, 62)),
-                    StrokeThickness = 2.5,
-                    Fill = System.Windows.Media.Brushes.Transparent,
+                    GeometrySize = 0,
+                    Stroke = new SolidColorPaint(new SKColor(240, 136, 62)) { StrokeThickness = 2.5f },
+                    Fill = null,
                     ScalesYAt = 0
                 }
             };
@@ -265,40 +278,82 @@ namespace MitsubishiMonitor.Demo.ViewModels
             // 仅在有电压数据时添加电压曲线
             if (HasVoltage)
             {
-                series.Add(new LineSeries
+                series.Add(new LineSeries<float>
                 {
-                    Title = "A相电压",
+                    Name = "A相电压",
                     Values = _phaseAValues,
-                    PointGeometry = null,
-                    Stroke = new SolidColorBrush(Color.FromRgb(245, 183, 59)),
-                    StrokeThickness = 1.5,
-                    Fill = System.Windows.Media.Brushes.Transparent,
+                    GeometrySize = 0,
+                    Stroke = new SolidColorPaint(new SKColor(245, 183, 59)) { StrokeThickness = 1.5f },
+                    Fill = null,
                     ScalesYAt = 1
                 });
-                series.Add(new LineSeries
+                series.Add(new LineSeries<float>
                 {
-                    Title = "B相电压",
+                    Name = "B相电压",
                     Values = _phaseBValues,
-                    PointGeometry = null,
-                    Stroke = new SolidColorBrush(Color.FromRgb(76, 175, 80)),
-                    StrokeThickness = 1.5,
-                    Fill = System.Windows.Media.Brushes.Transparent,
+                    GeometrySize = 0,
+                    Stroke = new SolidColorPaint(new SKColor(76, 175, 80)) { StrokeThickness = 1.5f },
+                    Fill = null,
                     ScalesYAt = 1
                 });
-                series.Add(new LineSeries
+                series.Add(new LineSeries<float>
                 {
-                    Title = "C相电压",
+                    Name = "C相电压",
                     Values = _phaseCValues,
-                    PointGeometry = null,
-                    Stroke = new SolidColorBrush(Color.FromRgb(88, 166, 255)),
-                    StrokeThickness = 1.5,
-                    Fill = System.Windows.Media.Brushes.Transparent,
+                    GeometrySize = 0,
+                    Stroke = new SolidColorPaint(new SKColor(88, 166, 255)) { StrokeThickness = 1.5f },
+                    Fill = null,
                     ScalesYAt = 1
                 });
             }
 
-            CombinedSeries = series;
+            var labelPaint = new SolidColorPaint(new SKColor(176, 186, 196));
+            var gridPaint = new SolidColorPaint(new SKColor(48, 54, 61)) { StrokeThickness = 1 };
+            XAxes = new[]
+            {
+                new Axis
+                {
+                    Name = "时间",
+                    Labels = TimeLabels,
+                    TextSize = 12,
+                    LabelsPaint = labelPaint,
+                    NamePaint = labelPaint,
+                    SeparatorsPaint = gridPaint,
+                    MinStep = 1
+                }
+            };
+            TemperatureYAxes = new[]
+            {
+                CreateAxis("温度(°C)", new SKColor(240, 136, 62), AxisPosition.Start)
+            };
+            CombinedYAxes = new[]
+            {
+                CreateAxis("温度(°C)", new SKColor(240, 136, 62), AxisPosition.Start),
+                CreateAxis("电压(V)", new SKColor(88, 166, 255), AxisPosition.End)
+            };
+            CombinedSeries = series.ToArray();
             TimeLabels = Array.Empty<string>();
+        }
+
+        private static Axis CreateAxis(string name, SKColor color, AxisPosition position)
+        {
+            var paint = new SolidColorPaint(color);
+            return new Axis
+            {
+                Name = name,
+                Position = position,
+                TextSize = 12,
+                Labeler = value => value.ToString("F1"),
+                LabelsPaint = paint,
+                NamePaint = paint,
+                SeparatorsPaint = new SolidColorPaint(new SKColor(48, 54, 61)) { StrokeThickness = 1 }
+            };
+        }
+
+        partial void OnTimeLabelsChanged(string[] value)
+        {
+            if (XAxes.Length > 0)
+                XAxes[0].Labels = value ?? Array.Empty<string>();
         }
 
         private void InitializeDisplayData()
@@ -343,7 +398,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     break;
                 case "本周":
                     var dayOfWeek = (int)now.DayOfWeek;
-                    FilterStartDate = now.Date.AddDays(-dayOfWeek);
+                    if (dayOfWeek == 0) dayOfWeek = 7;
+                    FilterStartDate = now.Date.AddDays(-(dayOfWeek - 1));
                     FilterEndDate = now;
                     break;
                 case "本月":
@@ -351,7 +407,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     FilterEndDate = now;
                     break;
                 case "全部":
-                    FilterStartDate = DateTime.MinValue.AddDays(1);
+                    FilterStartDate = new DateTime(2000, 1, 1);
                     FilterEndDate = now;
                     break;
             }
@@ -369,19 +425,34 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private async Task ExportToExcelAsync()
         {
             string filePath;
+            var exportSource = new CancellationTokenSource();
+            var previousExport = Interlocked.Exchange(ref _exportCts, exportSource);
+            previousExport?.Cancel();
+            previousExport?.Dispose();
+            var cancellationToken = exportSource.Token;
+
             try
             {
-                // 先加载数据
-                await LoadDataAsync();
-
-                // 获取当前显示的数据（直接查库，不依赖 UI 集合）
-                var tempLogs = await GetTemperatureLogsAsync();
-                var opLogs = await GetOperationLogsAsync();
+                var device = CurrentDevice;
+                var startTime = FilterStartDate;
+                var endTime = FilterEndDate;
+                using var dataService = new DataService();
+                await dataService.InitializeAsync(cancellationToken);
+                var exportData = await BoundedLogExportLoader.LoadAsync(
+                    dataService,
+                    device.Id,
+                    startTime,
+                    endTime,
+                    includeTemperature: true,
+                    includeOperation: true,
+                    cancellationToken);
+                var tempLogs = exportData.TemperatureLogs;
+                var opLogs = exportData.OperationLogs;
 
                 if (!tempLogs.Any() && !opLogs.Any())
                 {
                     var result = MessageBox.Show(
-                        $"数据库中暂无 [{CurrentDevice.Name}] 的数据可导出。\n\n" +
+                        $"数据库中暂无 [{device.Name}] 的数据可导出。\n\n" +
                         "是否要导出空模板？",
                         "暂无数据",
                         MessageBoxButton.YesNo,
@@ -389,23 +460,32 @@ namespace MitsubishiMonitor.Demo.ViewModels
 
                     if (result == MessageBoxResult.Yes)
                     {
-                        filePath = await _excelService.ExportDeviceReadablePackageAsync(CurrentDevice, new List<TemperatureLog>(), new List<OperationLog>());
+                        filePath = await _excelService.ExportDeviceReadablePackageAsync(
+                            device,
+                            new List<TemperatureLog>(),
+                            new List<OperationLog>(),
+                            cancellationToken);
                         MessageBox.Show($"空模板导出成功!\n\n工控机可直接打开:\n{filePath}", "导出成功", MessageBoxButton.OK, MessageBoxImage.Information);
                     }
                     return;
                 }
 
-                filePath = await _excelService.ExportDeviceReadablePackageAsync(CurrentDevice, tempLogs, opLogs);
+                filePath = await _excelService.ExportDeviceReadablePackageAsync(
+                    device, tempLogs, opLogs, cancellationToken);
 
                 MessageBox.Show(
-                    $"导出成功!\n\n设备: {CurrentDevice.Name}\n温度记录: {tempLogs.Count} 条\n操作日志: {opLogs.Count} 条\n\n工控机可直接打开:\n{filePath}",
+                    $"导出成功!\n\n设备: {device.Name}\n温度记录: {tempLogs.Count} 条\n操作日志: {opLogs.Count} 条\n\n工控机可直接打开:\n{filePath}",
                     "导出成功",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
             }
+            catch (OperationCanceledException)
+            {
+                // 页面关闭或新的导出替换本次任务。
+            }
             catch (Exception ex)
             {
-                MessageBox.Show($"导出失败: {ex.Message}\n\n详细错误:\n{ex}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"导出失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -414,23 +494,19 @@ namespace MitsubishiMonitor.Demo.ViewModels
         {
             try
             {
-                if (TemperatureThreshold < 0 || TemperatureThreshold > 200)
+                if (!float.IsFinite(TemperatureThreshold) ||
+                    TemperatureThreshold < 0 || TemperatureThreshold > 500)
                 {
-                    MessageBox.Show("温度阈值必须在 0-200°C 之间", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show("温度阈值必须是 0-500°C 之间的有限数值", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
 
-                // 更新PLC配置（内存）
-                if (_plcService?.Config != null)
-                {
-                    _plcService.Config.TemperatureThreshold = TemperatureThreshold;
-                }
+                if (CurrentDevice == null || _plcService?.Config == null)
+                    throw new InvalidOperationException("当前设备配置不可用");
 
-                // 持久化到 config.json（deviceIndex = CurrentDevice.Id - 1）
-                if (CurrentDevice != null)
-                {
-                    AppConfig.SaveDeviceThreshold(CurrentDevice.Id - 1, TemperatureThreshold);
-                }
+                // 先原子落盘，成功后才切换运行内存，避免保存失败却在本进程中悄悄生效。
+                AppConfig.SaveDeviceThreshold(CurrentDevice.Id - 1, TemperatureThreshold);
+                _plcService.Config.TemperatureThreshold = TemperatureThreshold;
 
                 // 同步更新 PlcStatus.IsAlarm，避免 UI 状态依赖 10s 温度采集线程
                 if (_plcService?.CurrentStatus != null)
@@ -478,100 +554,69 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private void AcknowledgeAlarm()
         {
             IsAlarmAcknowledged = true;
-            IsAlarm = false;
-            System.Diagnostics.Debug.WriteLine("[报警] 已手动复位报警");
-        }
-
-        private async Task<List<TemperatureLog>> GetTemperatureLogsAsync()
-        {
-            try
-            {
-                using var dataService = new DataService();
-                await dataService.InitializeAsync();
-                return await dataService.GetTemperatureLogsByDeviceAsync(CurrentDevice.Id, FilterStartDate, FilterEndDate);
-            }
-            catch
-            {
-                return new List<TemperatureLog>();
-            }
-        }
-
-        private async Task<List<OperationLog>> GetOperationLogsAsync()
-        {
-            try
-            {
-                using var dataService = new DataService();
-                await dataService.InitializeAsync();
-                return await dataService.GetOperationLogsByDeviceAsync(CurrentDevice.Id, FilterStartDate, FilterEndDate);
-            }
-            catch
-            {
-                return new List<OperationLog>();
-            }
+            _deviceManager?.AcknowledgeAlarm();
+            System.Diagnostics.Debug.WriteLine("[报警] 已确认并消音；报警条件未恢复前仍保持显示");
         }
 
         private async Task LoadDataAsync()
         {
             var loadVersion = Interlocked.Increment(ref _loadVersion);
+            var loadSource = new CancellationTokenSource();
+            var previousLoad = Interlocked.Exchange(ref _loadCts, loadSource);
+            previousLoad?.Cancel();
+            previousLoad?.Dispose();
+            var cancellationToken = loadSource.Token;
+            var deviceId = CurrentDevice.Id;
+            var startTime = FilterStartDate;
+            var endTime = FilterEndDate;
+
             try
             {
                 System.Diagnostics.Debug.WriteLine("[DeviceDetailViewModel] LoadDataAsync 开始执行");
 
-                var cache = CacheService.Instance;
-                var opLogsKey = CacheService.GetOperationLogsKey(CurrentDevice.Id, FilterStartDate, FilterEndDate);
-                var tempLogsKey = CacheService.GetTemperatureLogsKey(CurrentDevice.Id, FilterStartDate, FilterEndDate);
-
                 using var dataService = new DataService();
-                await dataService.InitializeAsync();
+                await dataService.InitializeAsync(cancellationToken);
 
-                var logs = await cache.GetOrLoadAsync(opLogsKey, async () =>
-                    await dataService.GetOperationLogsByDevicePagedAsync(CurrentDevice.Id, FilterStartDate, FilterEndDate, 0, DetailQueryLimit),
-                    TimeSpan.FromMinutes(2));
-                var totalOperationCount = await dataService.GetOperationLogCountByDeviceAsync(
-                    CurrentDevice.Id, FilterStartDate, FilterEndDate);
+                var operationCountTask = dataService.GetOperationLogCountAsync(
+                    deviceId, startTime, endTime, cancellationToken);
+                var statisticsTask = dataService.GetTemperatureStatisticsAsync(
+                    deviceId, startTime, endTime, cancellationToken);
+                var recentTemperatureTask = dataService.GetTemperatureLogsPagedAsync(
+                    deviceId, startTime, endTime, 0, 50, cancellationToken);
+                await Task.WhenAll(operationCountTask, statisticsTask, recentTemperatureTask);
 
-                System.Diagnostics.Debug.WriteLine($"[DeviceDetailViewModel] 查询到操作日志 {logs?.Count ?? 0} 条");
-
-                // 详情页不再展示日志列表（已迁移到独立的"日志查询"页），这里只更新计数
-                var tempLogs = await cache.GetOrLoadAsync(tempLogsKey, async () =>
-                    await dataService.GetTemperatureLogsByDevicePagedAsync(CurrentDevice.Id, FilterStartDate, FilterEndDate, 0, DetailQueryLimit),
-                    TimeSpan.FromMinutes(2));
-
-                System.Diagnostics.Debug.WriteLine($"[DeviceDetailViewModel] 查询到温度日志 {tempLogs?.Count ?? 0} 条");
+                var totalOperationCount = await operationCountTask;
+                var statistics = await statisticsTask;
+                var tempLogs = await recentTemperatureTask;
 
                 if (_isDisposed || loadVersion != Volatile.Read(ref _loadVersion))
                     return;
 
-                TotalOperationCount = totalOperationCount;
+                var tempValues = tempLogs.Select(log => log.Temperature).ToList();
+                var labels = tempLogs.Select(log => log.RecordTime.ToString("HH:mm")).ToArray();
 
-                if (tempLogs != null && tempLogs.Any())
+                await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
-                    AvgTemperature = (float)tempLogs.Average(l => l.Temperature);
-                    MaxTemperature = tempLogs.Max(l => l.Temperature);
-                    MinTemperature = tempLogs.Min(l => l.Temperature);
-                    AbnormalCount = tempLogs.Count(l => l.IsAbnormal);
+                    if (_isDisposed || loadVersion != Volatile.Read(ref _loadVersion))
+                        return;
 
-                    var tempValues = new ChartValues<float>();
-                    var labels = new List<string>();
+                    TotalOperationCount = totalOperationCount;
+                    AbnormalCount = statistics.AbnormalCount;
+                    AvgTemperature = statistics.Count == 0 ? 0 : statistics.Average;
+                    MaxTemperature = statistics.Count == 0 ? 0 : statistics.Maximum;
+                    MinTemperature = statistics.Count == 0 ? 0 : statistics.Minimum;
 
-                    foreach (var log in tempLogs.Take(50))
-                    {
-                        tempValues.Add(log.Temperature);
-                        labels.Add(log.RecordTime.ToString("HH:mm"));
-                    }
-
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        if (_isDisposed || loadVersion != Volatile.Read(ref _loadVersion))
-                            return;
-
-                        _temperatureValuesForVoltageChart.Clear();
-                        _temperatureValuesForVoltageChart.AddRange(tempValues);
-
-                        TimeLabels = labels.ToArray();
-                        System.Diagnostics.Debug.WriteLine($"[DeviceDetailViewModel] 温度数据已更新, Count={tempValues.Count}, Labels={labels.Count}");
-                    }, DispatcherPriority.Background);
-                }
+                    _temperatureValuesForVoltageChart.Clear();
+                    foreach (var value in tempValues)
+                        _temperatureValuesForVoltageChart.Add(value);
+                    TimeLabels = labels;
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[DeviceDetailViewModel] 历史统计 {statistics.Count} 条，图表 {tempValues.Count} 条");
+                }, DispatcherPriority.Background);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 时间范围切换或页面关闭时的正常取消。
             }
             catch (Exception ex)
             {
@@ -594,26 +639,16 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 TotalOperationCount += opDelta;
 
             // 目标温度显示
-            if (status.TargetTemperature > 0)
-            {
-                TargetTemperatureDisplay = $"{status.TargetTemperature:F1}°C";
-            }
+            TargetTemperatureDisplay = status.LastAuxiliarySampleTime != default &&
+                                       float.IsFinite(status.TargetTemperature)
+                ? $"{status.TargetTemperature:F1}°C"
+                : "--.-°C";
 
             // 报警状态更新
-            if (!IsAlarmAcknowledged)
-            {
-                IsAlarm = status.IsAlarm;
-                IsSsrFault = status.IsSsrFault;
-            }
-            else
-            {
-                if (!status.IsAlarm)
-                {
-                    IsAlarmAcknowledged = false;
-                }
-                IsAlarm = status.IsAlarm;
-                IsSsrFault = status.IsSsrFault;
-            }
+            if (!status.IsAlarm)
+                IsAlarmAcknowledged = false;
+            IsAlarm = status.IsAlarm;
+            IsSsrFault = status.IsSsrFault;
 
             // 电压文本（轻量 string 更新，不触发图表）
             if (HasVoltage)
@@ -781,6 +816,8 @@ namespace MitsubishiMonitor.Demo.ViewModels
             if (_isDisposed) return;
             _isDisposed = true;
             Interlocked.Increment(ref _loadVersion);
+            try { _loadCts?.Cancel(); _loadCts?.Dispose(); } catch { }
+            try { _exportCts?.Cancel(); _exportCts?.Dispose(); } catch { }
 
             // 停止定时器（Stop 后不再触发 Tick，无需额外 -= 匿名委托——匿名 lambda 无法匹配取消订阅）
             _plcUpdateTimer?.Stop();

@@ -23,6 +23,15 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly System.Timers.Timer _flushTimer;
         private int _isFlushing;
         private bool _isDisposed;
+        private long _droppedCount;
+
+        public event EventHandler<StorageHealthSnapshot> HealthChanged;
+        public int MaxBatchSize { get; set; } = 1000;
+        public bool IsHealthy { get; private set; } = true;
+        public string HealthMessage { get; private set; } = "自动导出未启用";
+        public int PendingCount => _opQueue.Count + _tempQueue.Count;
+        public long DroppedCount => Interlocked.Read(ref _droppedCount);
+        public DateTime? LastSuccessfulWriteTime { get; private set; }
 
         /// <summary>
         /// 内存队列上限，超出后丢弃最早的条目。
@@ -51,6 +60,9 @@ namespace MitsubishiMonitor.Demo.Services
         public void UpdateExportPath(string path)
         {
             ExportPath = path ?? "";
+            IsHealthy = true;
+            HealthMessage = string.IsNullOrWhiteSpace(ExportPath) ? "自动导出未启用" : "自动导出路径已更新";
+            PublishHealth();
         }
 
         /// <summary>
@@ -61,7 +73,14 @@ namespace MitsubishiMonitor.Demo.Services
             if (string.IsNullOrWhiteSpace(ExportPath)) return;
 
             _opQueue.Enqueue(log);
-            while (_opQueue.Count > MaxQueueSize && _opQueue.TryDequeue(out _)) { }
+            while (_opQueue.Count > MaxQueueSize && _opQueue.TryDequeue(out _))
+                Interlocked.Increment(ref _droppedCount);
+            if (DroppedCount > 0)
+            {
+                IsHealthy = false;
+                HealthMessage = $"自动导出队列溢出，已丢弃 {DroppedCount} 条辅助记录";
+                PublishHealth();
+            }
         }
 
         /// <summary>
@@ -72,7 +91,14 @@ namespace MitsubishiMonitor.Demo.Services
             if (string.IsNullOrWhiteSpace(ExportPath)) return;
 
             _tempQueue.Enqueue(log);
-            while (_tempQueue.Count > MaxQueueSize && _tempQueue.TryDequeue(out _)) { }
+            while (_tempQueue.Count > MaxQueueSize && _tempQueue.TryDequeue(out _))
+                Interlocked.Increment(ref _droppedCount);
+            if (DroppedCount > 0)
+            {
+                IsHealthy = false;
+                HealthMessage = $"自动导出队列溢出，已丢弃 {DroppedCount} 条辅助记录";
+                PublishHealth();
+            }
         }
 
         /// <summary>
@@ -85,8 +111,15 @@ namespace MitsubishiMonitor.Demo.Services
 
             try
             {
-                FlushOperationLogs();
-                FlushTemperatureLogs();
+                var operationOk = FlushOperationLogs();
+                var temperatureOk = FlushTemperatureLogs();
+                if (operationOk && temperatureOk && !string.IsNullOrWhiteSpace(ExportPath))
+                {
+                    IsHealthy = DroppedCount == 0;
+                    HealthMessage = DroppedCount == 0 ? "自动导出正常" : HealthMessage;
+                    LastSuccessfulWriteTime = DateTime.Now;
+                    PublishHealth();
+                }
             }
             finally
             {
@@ -94,20 +127,20 @@ namespace MitsubishiMonitor.Demo.Services
             }
         }
 
-        private void FlushOperationLogs()
+        private bool FlushOperationLogs()
         {
-            if (_opQueue.IsEmpty) return;
+            if (_opQueue.IsEmpty) return true;
 
             var exportPath = ExportPath;
             if (string.IsNullOrWhiteSpace(exportPath))
             {
                 // 运行中关闭了导出：清掉积压，避免之后重新开启时把旧数据一股脑写出去
                 while (_opQueue.TryDequeue(out _)) { }
-                return;
+                return true;
             }
 
             var logs = new List<OperationLog>();
-            while (_opQueue.TryDequeue(out var log)) logs.Add(log);
+            while (logs.Count < MaxBatchSize && _opQueue.TryDequeue(out var log)) logs.Add(log);
 
             try
             {
@@ -142,31 +175,34 @@ namespace MitsubishiMonitor.Demo.Services
                             $"<td>{H(log.LogType)}</td>" +
                             $"<td>{H(log.PointAddress)}</td>" +
                             $"<td>{H(log.PointLabel)}</td>" +
-                            $"<td class=\"{(log.Action == "ON" ? "on" : "off")}\">{H(log.Action)}</td>" +
+                            $"<td class=\"{(IsOnAction(log.Action) ? "on" : "off")}\">{H(log.Action)}</td>" +
                             $"<td>{H(log.Description)}</td>" +
                             "</tr>");
                     }
                 }
+                return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[AutoExport] 操作日志写入失败: {ex.Message}");
+                foreach (var log in logs) _opQueue.Enqueue(log);
+                MarkFailure($"操作日志自动导出失败，批次已重新入队：{ex.Message}");
+                return false;
             }
         }
 
-        private void FlushTemperatureLogs()
+        private bool FlushTemperatureLogs()
         {
-            if (_tempQueue.IsEmpty) return;
+            if (_tempQueue.IsEmpty) return true;
 
             var exportPath = ExportPath;
             if (string.IsNullOrWhiteSpace(exportPath))
             {
                 while (_tempQueue.TryDequeue(out _)) { }
-                return;
+                return true;
             }
 
             var logs = new List<TemperatureLog>();
-            while (_tempQueue.TryDequeue(out var log)) logs.Add(log);
+            while (logs.Count < MaxBatchSize && _tempQueue.TryDequeue(out var log)) logs.Add(log);
 
             try
             {
@@ -205,10 +241,13 @@ namespace MitsubishiMonitor.Demo.Services
                             "</tr>");
                     }
                 }
+                return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[AutoExport] 温度日志写入失败: {ex.Message}");
+                foreach (var log in logs) _tempQueue.Enqueue(log);
+                MarkFailure($"温度日志自动导出失败，批次已重新入队：{ex.Message}");
+                return false;
             }
         }
 
@@ -260,6 +299,40 @@ namespace MitsubishiMonitor.Demo.Services
         /// HTML 转义，防止设备名/标签中的特殊字符破坏页面结构
         /// </summary>
         private static string H(string value) => WebUtility.HtmlEncode(value ?? "");
+
+        private static bool IsOnAction(string action)
+        {
+            var normalized = (action ?? "").Trim();
+            return normalized.Equals("ON", StringComparison.OrdinalIgnoreCase) ||
+                   normalized == "开启" || normalized == "打开" || normalized == "启动" ||
+                   normalized.Equals("TRUE", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void MarkFailure(string message)
+        {
+            IsHealthy = false;
+            HealthMessage = message;
+            System.Diagnostics.Debug.WriteLine("[AutoExport] " + message);
+            PublishHealth();
+        }
+
+        private void PublishHealth()
+        {
+            SafeEventDispatcher.Invoke(
+                this,
+                HealthChanged,
+                new StorageHealthSnapshot
+                {
+                    IsReady = !string.IsNullOrWhiteSpace(ExportPath),
+                    IsHealthy = IsHealthy,
+                    Message = HealthMessage,
+                    PendingCount = PendingCount,
+                    DroppedCount = DroppedCount,
+                    LastSuccessfulWriteTime = LastSuccessfulWriteTime
+                },
+                ex => System.Diagnostics.Debug.WriteLine(
+                    $"[AutoExport] 健康事件订阅者异常: {ex.Message}"));
+        }
 
         /// <summary>
         /// 公共 CSS 样式（写入 head 中）

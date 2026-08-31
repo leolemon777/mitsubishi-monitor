@@ -2,16 +2,15 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <Nullable>disable</Nullable>
     <UseWPF>true</UseWPF>
-    <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
-    <InformationalVersion>1.1.0-communication-recovery.20260806</InformationalVersion>
+    <Version>1.2.1</Version>
+    <AssemblyVersion>1.2.1.0</AssemblyVersion>
+    <FileVersion>1.2.1.0</FileVersion>
+    <InformationalVersion>1.2.1-mixed-power-stability.20260830</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -27,17 +26,14 @@
     <PackageReference Include="HslCommunication" Version="12.3.0" />
 
     <!-- 图表库 -->
-    <PackageReference Include="LiveCharts.Wpf" Version="0.9.7" />
+    <PackageReference Include="LiveChartsCore.SkiaSharpView.WPF" Version="2.0.5" />
 
     <!-- 数据库 -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.11" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-
-    <!-- Excel导出 -->
-    <PackageReference Include="EPPlus" Version="7.5.2" />
+    <!-- 显式覆盖 EF Core 8 的旧传递依赖；2.1.13 携带已修复 CVE-2025-6965 的 SQLite。 -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <!-- Excel导出：MIT 许可，避免把工业软件误标为“非商业用途”。 -->
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
 
     <!-- MVVM框架 -->
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
@@ -45,9 +41,6 @@
     <!-- USB三色灯串口自动识别 -->
     <PackageReference Include="System.Management" Version="8.0.0" />
 
-    <!-- 依赖注入 -->
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
   </ItemGroup>
 
 </Project>

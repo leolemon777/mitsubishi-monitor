@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using MitsubishiMonitor.Demo.Models;
@@ -15,6 +14,7 @@ namespace MitsubishiMonitor.Demo.Views
     public partial class ExportConfigDialog : Window
     {
         private readonly Device _device;
+        private CancellationTokenSource _exportCts;
 
         public ExportConfigDialog(Device device)
         {
@@ -26,8 +26,12 @@ namespace MitsubishiMonitor.Demo.Views
 
         private async void Export_Click(object sender, RoutedEventArgs e)
         {
-            var start = StartDatePicker.SelectedDate ?? DateTime.Today;
-            var end = EndDatePicker.SelectedDate ?? DateTime.Now;
+            var start = (StartDatePicker.SelectedDate ?? DateTime.Today).Date;
+            var selectedEnd = EndDatePicker.SelectedDate ?? DateTime.Today;
+            // DatePicker 只保留日期。结束日若为今天则截止当前时刻，否则包含整天。
+            var end = selectedEnd.Date == DateTime.Today
+                ? DateTime.Now
+                : selectedEnd.Date.AddDays(1).AddTicks(-1);
 
             if (start > end)
             {
@@ -47,24 +51,37 @@ namespace MitsubishiMonitor.Demo.Views
             try
             {
                 IsEnabled = false;
+                var exportSource = new CancellationTokenSource();
+                var previousExport = Interlocked.Exchange(ref _exportCts, exportSource);
+                previousExport?.Cancel();
+                previousExport?.Dispose();
+                var cancellationToken = exportSource.Token;
 
                 using var dataService = new DataService();
-                await dataService.InitializeAsync();
-
-                var tempLogs = exportTemp
-                    ? await dataService.GetTemperatureLogsByDeviceAsync(_device.Id, start, end)
-                    : new List<TemperatureLog>();
-
-                var opLogs = exportOp
-                    ? await dataService.GetOperationLogsByDeviceAsync(_device.Id, start, end)
-                    : new List<OperationLog>();
+                await dataService.InitializeAsync(cancellationToken);
+                var exportData = await BoundedLogExportLoader.LoadAsync(
+                    dataService,
+                    _device.Id,
+                    start,
+                    end,
+                    exportTemp,
+                    exportOp,
+                    cancellationToken);
 
                 var excelService = new ExcelExportService();
-                var filePath = await excelService.ExportDeviceDataAsync(_device, tempLogs, opLogs);
+                var filePath = await excelService.ExportDeviceDataAsync(
+                    _device,
+                    exportData.TemperatureLogs,
+                    exportData.OperationLogs,
+                    cancellationToken: cancellationToken);
 
                 MessageBox.Show($"导出成功！\n\n文件：{filePath}", "导出完成", MessageBoxButton.OK, MessageBoxImage.Information);
                 DialogResult = true;
                 Close();
+            }
+            catch (OperationCanceledException)
+            {
+                // 对话框关闭时正常取消。
             }
             catch (Exception ex)
             {
@@ -80,6 +97,12 @@ namespace MitsubishiMonitor.Demo.Views
         {
             DialogResult = false;
             Close();
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            try { _exportCts?.Cancel(); _exportCts?.Dispose(); } catch { }
+            base.OnClosed(e);
         }
     }
 }

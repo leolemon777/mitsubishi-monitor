@@ -74,6 +74,46 @@ namespace MitsubishiMonitor.Demo.Tests
         }
 
         [Fact]
+        public async Task RepeatedPermanentNativeBlocks_OpenCircuitBreaker_AndStopCreatingSessions()
+        {
+            var first = new FakeTransport();
+            first.BlockTemperatureRead();
+            first.BlockAbort();
+            first.BlockClose();
+            var second = new FakeTransport();
+            second.BlockTemperatureRead();
+            second.BlockAbort();
+            second.BlockClose();
+            var unusedThird = new FakeTransport();
+            var factory = new QueueTransportFactory(first, second, unusedThird);
+            var service = CreateService(factory, ioTimeoutMs: 120);
+
+            try
+            {
+                Assert.True(await service.ConnectAsync());
+                Assert.True(float.IsNaN(await service.ReadTemperatureAsync().WaitAsync(TimeSpan.FromSeconds(2))));
+                Assert.True(await service.ConnectAsync());
+                Assert.True(float.IsNaN(await service.ReadTemperatureAsync().WaitAsync(TimeSpan.FromSeconds(2))));
+
+                Assert.True(service.IsCircuitBreakerOpen);
+                Assert.True(service.OutstandingDetachedOperations >= 6);
+                Assert.False(await service.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(1)));
+                Assert.Equal(2, factory.CreateCount);
+                Assert.Contains("暂停新连接", service.LastConnectionError);
+            }
+            finally
+            {
+                first.ReleaseTemperatureRead();
+                first.ReleaseAbort();
+                first.ReleaseClose();
+                second.ReleaseTemperatureRead();
+                second.ReleaseAbort();
+                second.ReleaseClose();
+                service.Dispose();
+            }
+        }
+
+        [Fact]
         public async Task DisconnectDuringConnect_RejectsLateSuccess()
         {
             var delayed = new FakeTransport();
@@ -119,8 +159,48 @@ namespace MitsubishiMonitor.Demo.Tests
             service.StopAcquisition();
 
             Assert.Equal(50f, received.Temperature);
+            Assert.False(received.HasFreshAuxiliaryData);
+            Assert.Null(received.AuxiliarySampleTime);
             Assert.Equal(50f, service.CurrentStatus.Temperature);
             Assert.NotEqual(default, service.CurrentStatus.LastTemperatureSampleTime);
+            Assert.True(service.CurrentStatus.IsConnected);
+        }
+
+        [Fact]
+        public async Task FirstIoSnapshot_EstablishesBaselineWithoutCreatingFalseOperationEvents()
+        {
+            var transport = new FakeTransport { BoolValue = true, TemperatureRaw = 500 };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var eventCount = 0;
+            service.StateChanged += (_, _) => Interlocked.Increment(ref eventCount);
+
+            Assert.True(await service.ConnectAsync());
+            service.StartAcquisition();
+            Assert.True(await WaitUntilAsync(
+                () => Volatile.Read(ref transport.BoolReadCount) >= 3,
+                TimeSpan.FromSeconds(1)));
+            Assert.Equal(0, Volatile.Read(ref eventCount));
+
+            transport.BoolValue = false;
+            Assert.True(await WaitUntilAsync(
+                () => Volatile.Read(ref eventCount) > 0,
+                TimeSpan.FromSeconds(1)));
+            service.StopAcquisition();
+        }
+
+        [Fact]
+        public async Task ShortBoolPayload_IsRejectedWithoutShrinkingBoundState()
+        {
+            var transport = new FakeTransport { ShortBoolPayloadAfterVerification = true };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+
+            Assert.True(await service.ConnectAsync());
+            var values = await service.ReadXPointsAsync();
+
+            Assert.Equal(service.Config.XCount, values.Length);
+            Assert.Equal(service.Config.XCount, service.CurrentStatus.X.Length);
             Assert.True(service.CurrentStatus.IsConnected);
         }
 
@@ -306,6 +386,62 @@ namespace MitsubishiMonitor.Demo.Tests
             Assert.Equal(default, service.CurrentStatus.LastTemperatureSampleTime);
         }
 
+        [Fact]
+        public async Task Connect_TcpSuccessButMcVerificationFails_DoesNotPublishOnline()
+        {
+            var transport = new FakeTransport { FailProtocolVerification = true };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var detailedStates = new ConcurrentQueue<PlcConnectionPhase>();
+            service.ConnectionStateChangedDetailed += (_, args) => detailedStates.Enqueue(args.Snapshot.Phase);
+
+            Assert.False(await service.ConnectAsync());
+            Assert.False(service.CurrentStatus.IsConnected);
+            Assert.Equal(PlcConnectionPhase.CommunicationFault, service.ConnectionSnapshot.Phase);
+            Assert.Contains(PlcConnectionPhase.ProtocolVerifying, detailedStates);
+            Assert.DoesNotContain(PlcConnectionPhase.OnlineFresh, detailedStates);
+        }
+
+        [Fact]
+        public async Task ValidTemperatureSample_CarriesGenerationSequenceAndRawValue()
+        {
+            var transport = new FakeTransport { TemperatureRaw = 845 };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var sampleTcs = new TaskCompletionSource<TemperatureSampleEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            service.TemperatureSampled += (_, sample) => sampleTcs.TrySetResult(sample);
+
+            Assert.True(await service.ConnectAsync());
+            service.StartAcquisition();
+            var sample = await sampleTcs.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(84.5f, sample.Temperature);
+            Assert.Equal(845, sample.RawValue);
+            Assert.Equal(1, sample.SampleSequence);
+            Assert.Equal(sample.ConnectionGeneration, service.CurrentStatus.LastTemperatureConnectionGeneration);
+            Assert.Equal(TemperatureSampleQuality.Valid, sample.Quality);
+            Assert.Equal(845, service.CurrentStatus.LastTemperatureRawValue);
+            service.StopAcquisition();
+        }
+
+        [Fact]
+        public async Task FiniteButImpossibleTemperature_IsRejectedWithoutPublishingSample()
+        {
+            var transport = new FakeTransport { TemperatureRaw = 30000 };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var sampleCount = 0;
+            service.TemperatureSampled += (_, _) => Interlocked.Increment(ref sampleCount);
+
+            Assert.True(await service.ConnectAsync());
+            Assert.True(float.IsNaN(await service.ReadTemperatureAsync()));
+            Assert.Equal(0, Volatile.Read(ref sampleCount));
+            Assert.Equal(TemperatureSampleQuality.OutOfRange, service.CurrentStatus.TemperatureQuality);
+            Assert.Equal(30000, service.CurrentStatus.LastTemperatureRawValue);
+            Assert.True(service.CurrentStatus.IsConnected);
+        }
+
         private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
         {
             var sw = Stopwatch.StartNew();
@@ -349,6 +485,7 @@ namespace MitsubishiMonitor.Demo.Tests
         private sealed class QueueTransportFactory : IMitsubishiPlcTransportFactory
         {
             private readonly ConcurrentQueue<IMitsubishiPlcTransport> _transports;
+            private int _createCount;
 
             public QueueTransportFactory(params IMitsubishiPlcTransport[] transports)
             {
@@ -357,10 +494,13 @@ namespace MitsubishiMonitor.Demo.Tests
 
             public IMitsubishiPlcTransport Create(PlcConfig config)
             {
+                Interlocked.Increment(ref _createCount);
                 if (_transports.TryDequeue(out var transport))
                     return transport;
                 throw new InvalidOperationException("测试没有准备下一代 PLC transport");
             }
+
+            public int CreateCount => Volatile.Read(ref _createCount);
         }
 
         private sealed class FakeTransport : IMitsubishiPlcTransport
@@ -378,6 +518,9 @@ namespace MitsubishiMonitor.Demo.Tests
             public bool FailTemperatureRead { get; set; }
             public bool ReturnEmptyTemperature { get; set; }
             public bool ReturnEmptyDintTemperature { get; set; }
+            public bool FailProtocolVerification { get; set; }
+            public bool ShortBoolPayloadAfterVerification { get; set; }
+            public volatile bool BoolValue;
             public int ReceiveTimeOut { get; set; }
             public int ConnectTimeOut { get; set; }
             public int CloseCount;
@@ -420,7 +563,15 @@ namespace MitsubishiMonitor.Demo.Tests
             {
                 Interlocked.Increment(ref BoolReadCount);
                 Interlocked.Increment(ref TotalReadCount);
-                return OperateResult.CreateSuccessResult(new bool[length]);
+                if (FailProtocolVerification &&
+                    string.Equals(address, "X0", StringComparison.OrdinalIgnoreCase))
+                    return new OperateResult<bool[]>("注入 MC 协议验证失败");
+                if (ShortBoolPayloadAfterVerification &&
+                    Volatile.Read(ref BoolReadCount) > 1)
+                    return OperateResult.CreateSuccessResult(
+                        Enumerable.Repeat(BoolValue, Math.Max(0, length - 1)).ToArray());
+                return OperateResult.CreateSuccessResult(
+                    Enumerable.Repeat(BoolValue, length).ToArray());
             }
 
             public OperateResult<short[]> ReadInt16(string address, ushort length)
