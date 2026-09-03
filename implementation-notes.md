@@ -141,3 +141,11 @@ Adversarial review found that the v1.2.1 reconnect backoff was applied twice aft
 Fix: `ApplyReconnectOutcome` now opens the scheduler gate immediately after a failure. Backoff is applied exactly once, inside the next scheduled task's delay. First-retry semantics are unchanged (5 seconds for required-online, 30 seconds for auto-standby after a drop is detected), and steady-state intervals now equal the `DeviceMonitoringPolicy` delay plus at most one 5-second monitor tick. A regression test asserts that the gate opens immediately after failure, so the double application cannot be reintroduced silently.
 
 Verification: Debug and Release builds pass with zero warnings; xUnit passes 46/46 in both configurations; `git diff --check` is clean.
+
+## 2026-09-03 Startup and Legacy Config Fix v1.2.3
+
+The 1.2.1 reconnect package crashed on `MainWindow` show: `Run.Text` defaults to TwoWay, and `Device.MonitoringModeDisplay` is a get-only display string. WPF raised `InvalidOperationException` and the process terminated.
+
+Fix: every `<Run Text="{Binding ...}"/>` that lacked an explicit mode now uses `Mode=OneWay`, including `MonitoringModeDisplay`, collection `Count` properties, and other display-only values. Legacy configurations that contain the four PLC IPs but predate `DeviceThresholds` and `DeviceMonitoringModes` now migrate those missing fields to the established 90°C and `AutoStandby` defaults instead of disabling all PLC connections.
+
+Verification: the release must pass the full automated suite plus a real process-level startup smoke test before packaging. The replacement package is `publish/MitsubishiMonitor-1.2.3-startup-config-fix-20260903/` (FileVersion `1.2.3.0`); developer `config.json` remains excluded from publish output.

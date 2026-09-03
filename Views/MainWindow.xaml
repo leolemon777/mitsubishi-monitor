@@ -364,9 +364,9 @@
                                 <DataTemplate>
                                     <Border Background="#0D1520" BorderBrush="#FF4444" BorderThickness="0,0,0,1" Padding="12,6" Margin="0,0,8,0">
                                         <TextBlock FontSize="11" FontFamily="Consolas">
-                                            <Run Text="{Binding Name}" Foreground="#FFAAAA"/>
+                                            <Run Text="{Binding Name, Mode=OneWay}" Foreground="#FFAAAA"/>
                                             <Run Text=" [" Foreground="#5A4A4A"/>
-                                            <Run Text="{Binding IpAddress}" Foreground="#5A6B7C"/>
+                                            <Run Text="{Binding IpAddress, Mode=OneWay}" Foreground="#5A6B7C"/>
                                             <Run Text="]" Foreground="#5A4A4A"/>
                                         </TextBlock>
                                     </Border>

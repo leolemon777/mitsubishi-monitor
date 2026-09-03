@@ -134,13 +134,26 @@ namespace MitsubishiMonitor.Demo.Tests
         }
 
         [Fact]
-        public void ConfigurationValidator_MigratesMissingModes_AndRejectsInvalidModes()
+        public void ConfigurationValidator_MigratesLegacyMissingThresholdsAndModes()
         {
             var legacy = ValidDocument();
+            legacy.DeviceThresholds = Array.Empty<float>();
             legacy.DeviceMonitoringModes = Array.Empty<DeviceMonitoringMode>();
             Assert.True(AppConfig.TryValidateDocument(legacy, out var legacyError), legacyError);
+            Assert.Equal(new[] { 90f, 90f, 90f, 90f }, legacy.DeviceThresholds);
             Assert.Equal(4, legacy.DeviceMonitoringModes.Length);
+            Assert.All(legacy.DeviceMonitoringModes,
+                mode => Assert.Equal(DeviceMonitoringMode.AutoStandby, mode));
 
+            var wrongThresholdLength = ValidDocument();
+            wrongThresholdLength.DeviceThresholds = new[] { 90f };
+            Assert.False(AppConfig.TryValidateDocument(wrongThresholdLength, out var thresholdLengthError));
+            Assert.Contains("DeviceThresholds", thresholdLengthError);
+        }
+
+        [Fact]
+        public void ConfigurationValidator_RejectsInvalidMonitoringModes()
+        {
             var wrongLength = ValidDocument();
             wrongLength.DeviceMonitoringModes = new[] { DeviceMonitoringMode.AutoStandby };
             Assert.False(AppConfig.TryValidateDocument(wrongLength, out var lengthError));

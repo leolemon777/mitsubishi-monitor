@@ -85,7 +85,7 @@
                     CornerRadius="0,0,8,8" Padding="12,6">
                 <TextBlock FontSize="11" Foreground="#484F58">
                     <Run Text="共 "/>
-                    <Run Text="{Binding Notifications.Count, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                    <Run Text="{Binding Notifications.Count, Mode=OneWay, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
                     <Run Text=" 条通知"/>
                 </TextBlock>
             </Border>

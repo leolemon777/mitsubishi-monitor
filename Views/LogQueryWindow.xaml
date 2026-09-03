@@ -575,9 +575,9 @@
                 <TextBlock Grid.Column="1" Foreground="#7D8590"
                            VerticalAlignment="Center" Margin="0,0,16,0" FontSize="11" FontFamily="Consolas">
                     <Run Text="范围 "/>
-                    <Run Text="{Binding FilterStartDate, StringFormat=yyyy-MM-dd HH:mm}"/>
+                    <Run Text="{Binding FilterStartDate, StringFormat=yyyy-MM-dd HH:mm, Mode=OneWay}"/>
                     <Run Text=" ~ "/>
-                    <Run Text="{Binding FilterEndDate, StringFormat=yyyy-MM-dd HH:mm}"/>
+                    <Run Text="{Binding FilterEndDate, StringFormat=yyyy-MM-dd HH:mm, Mode=OneWay}"/>
                 </TextBlock>
             </Grid>
         </Border>

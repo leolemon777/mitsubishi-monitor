@@ -21,7 +21,7 @@
         <!-- 显示模式 -->
         <StackPanel Visibility="{Binding IsEditing, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
             <TextBlock FontSize="36" FontWeight="Bold" Foreground="#FF6B6B" FontFamily="Consolas" HorizontalAlignment="Center">
-                <Run Text="{Binding Value, StringFormat={}{0:F1}}"/><Run Text="°C" FontSize="22"/>
+                <Run Text="{Binding Value, StringFormat={}{0:F1}, Mode=OneWay}"/><Run Text="°C" FontSize="22"/>
             </TextBlock>
             <TextBlock Text="{Binding Description}" FontSize="12" Foreground="#7D8590" 
                        HorizontalAlignment="Center" Margin="0,8,0,0" TextWrapping="Wrap"/>

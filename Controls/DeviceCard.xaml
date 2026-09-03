@@ -270,13 +270,13 @@
 
                     <StackPanel Grid.Column="0" Orientation="Horizontal">
                         <TextBlock FontSize="10" Foreground="#3A4A5A" FontFamily="Consolas">
-                            <Run Text="IP:"/><Run Text="{Binding IpAddress}" Foreground="#4A5568"/>
+                            <Run Text="IP:"/><Run Text="{Binding IpAddress, Mode=OneWay}" Foreground="#4A5568"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="#3A4A5A" FontFamily="Consolas" Margin="16,0,0,0">
-                            <Run Text="UPDATE:"/><Run Text="{Binding LastUpdateTime, StringFormat='{}{0:HH:mm:ss}'}" Foreground="#4A5568"/>
+                            <Run Text="UPDATE:"/><Run Text="{Binding LastUpdateTime, StringFormat='{}{0:HH:mm:ss}', Mode=OneWay}" Foreground="#4A5568"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="#3A4A5A" FontFamily="Consolas" Margin="16,0,0,0">
-                            <Run Text="MODE:"/><Run Text="{Binding MonitoringModeDisplay}" Foreground="#5A8FB8"/>
+                            <Run Text="MODE:"/><Run Text="{Binding MonitoringModeDisplay, Mode=OneWay}" Foreground="#5A8FB8"/>
                         </TextBlock>
                     </StackPanel>
 

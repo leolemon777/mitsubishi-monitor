@@ -93,7 +93,7 @@
         <Border Grid.Row="2" Background="#161B22" Padding="14,6">
             <TextBlock FontSize="11" Foreground="#484F58">
                 <Run Text="共 "/>
-                <Run Text="{Binding Logs.Count, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                <Run Text="{Binding Logs.Count, Mode=OneWay, RelativeSource={RelativeSource AncestorType=UserControl}}"/>
                 <Run Text=" 条记录"/>
             </TextBlock>
         </Border>

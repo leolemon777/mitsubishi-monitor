@@ -390,7 +390,13 @@ namespace MitsubishiMonitor.Demo
             }
             document.DeviceIPs = normalizedIps;
 
-            if (document.DeviceThresholds == null || document.DeviceThresholds.Length != DeviceCount)
+            // 兼容早期版本：旧配置只保存数据库路径和 4 台 PLC IP，报警阈值由代码默认值提供。
+            // 升级后若直接把缺失字段判为损坏，会禁止所有 PLC 自动连接，界面看起来像“卡住”。
+            if (document.DeviceThresholds == null || document.DeviceThresholds.Length == 0)
+            {
+                document.DeviceThresholds = (float[])DefaultThresholds.Clone();
+            }
+            else if (document.DeviceThresholds.Length != DeviceCount)
             {
                 error = $"DeviceThresholds 必须恰好包含 {DeviceCount} 个阈值";
                 return false;
