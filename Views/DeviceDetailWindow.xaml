@@ -514,6 +514,7 @@
                                                     Series="{Binding CombinedSeries}"
                                                     XAxes="{Binding XAxes}"
                                                     YAxes="{Binding CombinedYAxes}"
+                                                    Background="#080C12"
                                                     LegendPosition="Top"
                                                     AnimationsSpeed="0:0:0"
                                                     Height="320"/>
@@ -560,6 +561,7 @@
                                                     Series="{Binding CombinedSeries}"
                                                     XAxes="{Binding XAxes}"
                                                     YAxes="{Binding TemperatureYAxes}"
+                                                    Background="#080C12"
                                                     LegendPosition="Hidden"
                                                     AnimationsSpeed="0:0:0"
                                                     Height="320"/>

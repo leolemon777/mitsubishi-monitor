@@ -6,14 +6,11 @@ namespace MitsubishiMonitor.Demo.Models
     public enum PlcConnectionPhase
     {
         Disconnected,
-        Backoff,
         TcpConnecting,
         ProtocolVerifying,
         AwaitingFirstSample,
         OnlineFresh,
-        OnlineStale,
         CommunicationFault,
-        Stopping,
         Disposed
     }
 
@@ -24,7 +21,6 @@ namespace MitsubishiMonitor.Demo.Models
         InvalidPayload,
         OutOfRange,
         ExcessiveStep,
-        Stale,
-        Superseded
+        Stale
     }
 }

@@ -104,8 +104,14 @@ namespace MitsubishiMonitor.Demo.Tests
                 remove { }
             }
             public PlcConnectionSnapshot ConnectionSnapshot { get; } =
-                new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "测试", 0, null, null, null);
+                new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "测试", 0, null, null);
             public event EventHandler<StateChangeEvent> StateChanged
+            {
+                add { }
+                remove { }
+            }
+
+            public event EventHandler<TemperatureSampleEventArgs> TemperatureSampled
             {
                 add { }
                 remove { }

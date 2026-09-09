@@ -29,7 +29,12 @@ namespace MitsubishiMonitor.Demo
         static AppConfig()
         {
             JsonOptions.Converters.Add(new JsonStringEnumConverter());
-            Load();
+            // AppConfig 可能在 WPF OnStartup 之前被首次触发。直接从进程参数判断隔离模式，
+            // 避免干净发布目录在演示/冒烟启动时先生成生产 config.json。
+            if (CommandLineRequestsDemoIsolation(Environment.GetCommandLineArgs()))
+                ResetToSafeDefaults();
+            else
+                Load();
         }
 
         private static readonly string ConfigFilePath = Path.Combine(
@@ -72,6 +77,11 @@ namespace MitsubishiMonitor.Demo
         public static bool LoadedFromBackup { get; private set; }
         public static bool RequiresRestartForDatabasePathChange { get; private set; }
         public static bool IsDemoIsolationActive { get; private set; }
+
+        internal static bool CommandLineRequestsDemoIsolation(string[] args)
+            => args?.Any(arg =>
+                string.Equals(arg, "--demo-video", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(arg, "--ui-smoke", StringComparison.OrdinalIgnoreCase)) == true;
 
         /// <summary>
         /// 将演示运行时切换到每进程独立的临时数据库，并强制关闭自动导出。

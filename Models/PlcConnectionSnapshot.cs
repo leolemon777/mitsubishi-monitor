@@ -13,7 +13,6 @@ namespace MitsubishiMonitor.Demo.Models
             PlcConnectionPhase phase,
             string reason,
             int consecutiveFailures,
-            DateTimeOffset? nextRetryAt,
             DateTimeOffset? lastProtocolSuccessAt,
             DateTimeOffset? lastTemperatureSampleAt)
         {
@@ -21,7 +20,6 @@ namespace MitsubishiMonitor.Demo.Models
             Phase = phase;
             Reason = reason ?? "";
             ConsecutiveFailures = Math.Max(0, consecutiveFailures);
-            NextRetryAt = nextRetryAt;
             LastProtocolSuccessAt = lastProtocolSuccessAt;
             LastTemperatureSampleAt = lastTemperatureSampleAt;
         }
@@ -30,12 +28,10 @@ namespace MitsubishiMonitor.Demo.Models
         public PlcConnectionPhase Phase { get; }
         public string Reason { get; }
         public int ConsecutiveFailures { get; }
-        public DateTimeOffset? NextRetryAt { get; }
         public DateTimeOffset? LastProtocolSuccessAt { get; }
         public DateTimeOffset? LastTemperatureSampleAt { get; }
         public bool IsTransportUsable => Phase is PlcConnectionPhase.AwaitingFirstSample
-            or PlcConnectionPhase.OnlineFresh
-            or PlcConnectionPhase.OnlineStale;
+            or PlcConnectionPhase.OnlineFresh;
         public bool IsDataFresh => Phase == PlcConnectionPhase.OnlineFresh;
     }
 

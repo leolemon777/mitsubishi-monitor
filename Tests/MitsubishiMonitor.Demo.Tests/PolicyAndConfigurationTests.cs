@@ -133,6 +133,19 @@ namespace MitsubishiMonitor.Demo.Tests
                 mode => Assert.Equal(DeviceMonitoringMode.AutoStandby, mode));
         }
 
+        [Theory]
+        [InlineData("--demo-video")]
+        [InlineData("--DEMO-VIDEO")]
+        [InlineData("--ui-smoke")]
+        [InlineData("--UI-SMOKE")]
+        public void DemoIsolationCommandLine_RecognizesOnlyExplicitFlags(string flag)
+        {
+            Assert.True(AppConfig.CommandLineRequestsDemoIsolation(new[] { "app.exe", flag }));
+            Assert.False(AppConfig.CommandLineRequestsDemoIsolation(
+                new[] { "app.exe", "demo-video.txt", "--unrelated" }));
+            Assert.False(AppConfig.CommandLineRequestsDemoIsolation(null));
+        }
+
         [Fact]
         public void ConfigurationValidator_MigratesLegacyMissingThresholdsAndModes()
         {

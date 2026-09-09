@@ -894,7 +894,7 @@ namespace MitsubishiMonitor.Demo.Services
             // 事件在后台线程发布，旧代的迟到关闭/异常可能晚于新代上线到达。
             // 仅允许当前服务代次触发自动重连，避免新连接刚建立就被旧事件踢回退避。
             var currentSnapshot = wrapper.PlcService.ConnectionSnapshot;
-            if (currentSnapshot == null || currentSnapshot.Generation != snapshot.Generation)
+            if (currentSnapshot == null || !ReferenceEquals(currentSnapshot, snapshot))
                 return;
 
             if (!_stopped &&
@@ -1180,11 +1180,8 @@ namespace MitsubishiMonitor.Demo.Services
                 int capturedId = device.Id;
                 plcService.StateChanged += (s, e) => OnPlcStateChanged(capturedId, e);
 
-                // 订阅温度采样事件，写入温度日志
-                if (plcService is MitsubishiPlcService mitsubishiPlc)
-                    mitsubishiPlc.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
-                else if (plcService is DemoPlcService demoPlc)
-                    demoPlc.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
+                // 订阅统一温度采样契约，管理层不依赖真实/演示实现类型。
+                plcService.TemperatureSampled += (s, e) => OnTemperatureSampled(capturedId, e);
 
                 // 使用结构化状态，区分 TCP、MC 协议验证、等待首样本和真正新鲜在线。
                 plcService.ConnectionStateChangedDetailed += (s, args) =>

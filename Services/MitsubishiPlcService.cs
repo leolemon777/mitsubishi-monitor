@@ -47,6 +47,36 @@ namespace MitsubishiMonitor.Demo.Services
             public TemperatureRegisterDefinition Definition { get; }
         }
 
+        private readonly struct ConnectionPhaseChange
+        {
+            public ConnectionPhaseChange(
+                PlcConnectionPhase previousPhase,
+                PlcConnectionSnapshot snapshot)
+            {
+                PreviousPhase = previousPhase;
+                Snapshot = snapshot;
+            }
+
+            public PlcConnectionPhase PreviousPhase { get; }
+            public PlcConnectionSnapshot Snapshot { get; }
+            public bool HasValue => Snapshot != null;
+        }
+
+        private readonly struct DeferredDisconnectNotification
+        {
+            public DeferredDisconnectNotification(
+                ConnectionPhaseChange phaseChange,
+                bool notifyLegacyDisconnected)
+            {
+                PhaseChange = phaseChange;
+                NotifyLegacyDisconnected = notifyLegacyDisconnected;
+            }
+
+            public ConnectionPhaseChange PhaseChange { get; }
+            public bool NotifyLegacyDisconnected { get; }
+            public bool HasValue => PhaseChange.HasValue;
+        }
+
         private enum IoFailureLane
         {
             General,
@@ -61,8 +91,6 @@ namespace MitsubishiMonitor.Demo.Services
         private bool[] _lastY;
         private bool[] _lastM;
         private long _ioBaselineGeneration;
-        private volatile bool _isConnected;
-
         private CancellationTokenSource _acquisitionCts;
         private Task _acquisitionLoopTask;
         private volatile bool _isAcquiring;
@@ -101,12 +129,10 @@ namespace MitsubishiMonitor.Demo.Services
         private int _circuitBreakerOpen;
         private string _circuitBreakerReason = "";
 
-        private PlcConnectionPhase _connectionPhase = PlcConnectionPhase.Disconnected;
         private PlcConnectionSnapshot _connectionSnapshot =
-            new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "尚未连接", 0, null, null, null);
+            new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "尚未连接", 0, null, null);
         private int _connectionFailureCount;
         private DateTimeOffset? _lastProtocolSuccessAt;
-        private DateTimeOffset? _nextRetryAt;
         private long _temperatureSampleSequence;
 
         // 无线网桥偶发丢一两个包很常见，连续失败达到阈值才判离线。
@@ -163,7 +189,7 @@ namespace MitsubishiMonitor.Demo.Services
         private bool TryGetTemperatureSampleAgeLocked(out TimeSpan age)
         {
             age = TimeSpan.Zero;
-            if (!_isAcquiring || !_isConnected)
+            if (!_isAcquiring || !IsConnectionCurrentLocked(_connectionGeneration))
                 return false;
 
             var baseline = Interlocked.Read(ref _lastTemperatureSampleTimestamp);
@@ -202,11 +228,12 @@ namespace MitsubishiMonitor.Demo.Services
             bool wasConnected;
             string reason;
             int failures;
+            ConnectionPhaseChange phaseChange;
 
             lock (_sessionSync)
             {
                 var expectedGeneration = _connectionGeneration;
-                if (!_isConnected ||
+                if (!IsConnectionCurrentLocked(expectedGeneration) ||
                     !IsTemperatureSampleStaleLocked(out age))
                     return false;
 
@@ -221,12 +248,18 @@ namespace MitsubishiMonitor.Demo.Services
                         reason,
                         expectedGeneration,
                         out sessionToClose,
-                        out wasConnected))
+                        out wasConnected,
+                        out phaseChange))
                     return false;
             }
 
             LogIoFailure(reason, failures, immediate: true);
-            CompleteDisconnectedState(sessionToClose, reason, notify: true, wasConnected: wasConnected);
+            CompleteDisconnectedState(
+                sessionToClose,
+                phaseChange,
+                reason,
+                notify: true,
+                wasConnected: wasConnected);
             return true;
         }
 
@@ -256,61 +289,115 @@ namespace MitsubishiMonitor.Demo.Services
 
         }
 
-        private void PublishConnectionPhase(
+        /// <summary>
+        /// 调用方必须持有 _sessionSync。连接代次、阶段、PlcStatus 在线投影和
+        /// 对外快照在同一临界区内提交，旧代调用不能再覆盖新代状态。
+        /// </summary>
+        private bool TrySetConnectionPhaseLocked(
             PlcConnectionPhase phase,
             string reason,
-            long? generation = null,
-            DateTimeOffset? nextRetryAt = null)
+            long expectedGeneration,
+            out ConnectionPhaseChange change)
         {
+            change = default;
+            if (_connectionGeneration != expectedGeneration)
+                return false;
+
+            var currentSnapshot = Volatile.Read(ref _connectionSnapshot);
+            if (!PlcConnectionTransitionPolicy.CanTransition(
+                    currentSnapshot.Generation,
+                    currentSnapshot.Phase,
+                    expectedGeneration,
+                    phase))
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[PLC连接] 拒绝非法状态跳转: {_config.Name} " +
+                    $"generation {currentSnapshot.Generation}->{expectedGeneration}, " +
+                    $"phase {currentSnapshot.Phase}->{phase}");
+                return false;
+            }
+
             var snapshot = new PlcConnectionSnapshot(
-                generation ?? Interlocked.Read(ref _connectionGeneration),
+                expectedGeneration,
                 phase,
                 reason,
                 Volatile.Read(ref _connectionFailureCount),
-                nextRetryAt ?? _nextRetryAt,
                 _lastProtocolSuccessAt,
                 _status.LastTemperatureSampleTime == default
                     ? null
                     : new DateTimeOffset(_status.LastTemperatureSampleTime));
 
+            // 先提交唯一真相，再通知旧绑定模型。PlcStatus setter 会同步触发
+            // PropertyChanged；订阅者即使在回调中重入 Disconnect，也只能推进
+            // 到更新代次，外层旧快照不会在回调返回后重新覆盖它。
             Volatile.Write(ref _connectionSnapshot, snapshot);
+            if (_status.IsConnected != snapshot.IsTransportUsable)
+                _status.IsConnected = snapshot.IsTransportUsable;
+            change = new ConnectionPhaseChange(currentSnapshot.Phase, snapshot);
+            return true;
+        }
+
+        private bool TrySetConnectionPhase(
+            PlcConnectionPhase phase,
+            string reason,
+            long expectedGeneration,
+            out PlcConnectionSnapshot snapshot)
+        {
+            ConnectionPhaseChange change;
+            lock (_sessionSync)
+            {
+                if (!TrySetConnectionPhaseLocked(
+                        phase,
+                        reason,
+                        expectedGeneration,
+                        out change))
+                {
+                    snapshot = null;
+                    return false;
+                }
+            }
+
+            snapshot = change.Snapshot;
+            PublishConnectionPhaseChange(change);
+            return true;
+        }
+
+        private bool IsSnapshotCurrent(PlcConnectionSnapshot snapshot)
+            => snapshot != null && ReferenceEquals(Volatile.Read(ref _connectionSnapshot), snapshot);
+
+        private void PublishConnectionPhaseChange(ConnectionPhaseChange change)
+        {
+            // 若另一线程已推进到更新快照，旧事件直接作废，避免订阅者倒序观察状态。
+            if (!change.HasValue || !IsSnapshotCurrent(change.Snapshot))
+                return;
+
+            var snapshot = change.Snapshot;
             SafeEventDispatcher.Invoke(
                 this,
                 ConnectionStateChangedDetailed,
                 new PlcConnectionChangedEventArgs(snapshot),
                 ex => System.Diagnostics.Debug.WriteLine(
                     $"[PLC连接] 结构化状态订阅者异常: {_config.Name} - {ex.Message}"));
-        }
 
-        private void SetConnectionPhase(
-            PlcConnectionPhase phase,
-            string reason,
-            long? generation = null,
-            DateTimeOffset? nextRetryAt = null)
-        {
-            var previousPhase = _connectionPhase;
-            _connectionPhase = phase;
-            if (nextRetryAt.HasValue)
-                _nextRetryAt = nextRetryAt;
-            else if (phase != PlcConnectionPhase.Backoff)
-                _nextRetryAt = null;
-            PublishConnectionPhase(phase, reason, generation, nextRetryAt);
+            // 订阅者允许同步触发断线/重连；发生重入后不能再把旧阶段写到
+            // 新阶段日志后面，避免现场诊断时间线被倒序记录误导。
+            if (!IsSnapshotCurrent(snapshot))
+                return;
 
             // 持久化关键状态跃迁，现场拿到 diagnostic 日志即可区分 TCP、MC
             // 验证、首样本等待和真正的数据新鲜，而不必依赖 Debug 输出。
-            if (previousPhase != phase ||
-                phase is PlcConnectionPhase.CommunicationFault or PlcConnectionPhase.Disconnected)
+            if (change.PreviousPhase != snapshot.Phase ||
+                snapshot.Phase is PlcConnectionPhase.CommunicationFault or PlcConnectionPhase.Disconnected)
             {
                 Views.MainWindow.DbgLog("MitsubishiPlcService:ConnectionPhase", "PLC 连接阶段变化", new
                 {
                     device = _config.Name,
                     _config.IpAddress,
-                    generation = generation ?? Interlocked.Read(ref _connectionGeneration),
-                    previousPhase = previousPhase.ToString(),
-                    phase = phase.ToString(),
-                    reason,
-                    consecutiveFailures = Volatile.Read(ref _connectionFailureCount),
-                    nextRetryAt = nextRetryAt ?? _nextRetryAt
+                    snapshot.Generation,
+                    previousPhase = change.PreviousPhase.ToString(),
+                    phase = snapshot.Phase.ToString(),
+                    snapshot.Reason,
+                    snapshot.ConsecutiveFailures
                 }, "CONNECT");
             }
         }
@@ -361,7 +448,7 @@ namespace MitsubishiMonitor.Demo.Services
             int lockTimeout = Math.Max(operationTimeout, _config.IoLockWaitTimeout);
             bool lockTaken = false;
             bool nativeGateTaken = false;
-            bool notifyDisconnectedAfterUnlock = false;
+            DeferredDisconnectNotification deferredDisconnect = default;
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
@@ -370,7 +457,7 @@ namespace MitsubishiMonitor.Demo.Services
                     .ConfigureAwait(false);
                 if (!lockTaken)
                 {
-                    notifyDisconnectedAfterUnlock = HandleHardIoTimeout(
+                    deferredDisconnect = HandleHardIoTimeout(
                         session,
                         operationName,
                         lockTimeout,
@@ -389,7 +476,7 @@ namespace MitsubishiMonitor.Demo.Services
                     .ConfigureAwait(false);
                 if (!nativeGateTaken)
                 {
-                    notifyDisconnectedAfterUnlock = HandleHardIoTimeout(
+                    deferredDisconnect = HandleHardIoTimeout(
                         session,
                         operationName,
                         lockTimeout,
@@ -407,7 +494,7 @@ namespace MitsubishiMonitor.Demo.Services
 
                 if (!ReferenceEquals(completed, callTask))
                 {
-                    notifyDisconnectedAfterUnlock = HandleHardIoTimeout(
+                    deferredDisconnect = HandleHardIoTimeout(
                         session,
                         operationName,
                         operationTimeout,
@@ -453,21 +540,27 @@ namespace MitsubishiMonitor.Demo.Services
 
                 // 外部订阅者不能在持有本代 I/O 锁时同步回调，避免未来订阅者
                 // 再进入连接 API 后形成新的锁循环。
-                if (notifyDisconnectedAfterUnlock)
+                if (deferredDisconnect.HasValue)
                 {
-                    try
+                    PublishConnectionPhaseChange(deferredDisconnect.PhaseChange);
+                    var disconnectedSnapshot = deferredDisconnect.PhaseChange.Snapshot;
+                    if (deferredDisconnect.NotifyLegacyDisconnected &&
+                        IsSnapshotCurrent(disconnectedSnapshot))
                     {
-                        SafeEventDispatcher.Invoke(
-                            this,
-                            ConnectionStateChanged,
-                            false,
-                            ex => System.Diagnostics.Debug.WriteLine(
-                                $"[PLC连接] 断线事件订阅者异常: {_config.Name} - {ex.Message}"));
-                    }
-                    catch (Exception eventEx)
-                    {
-                        System.Diagnostics.Debug.WriteLine(
-                            $"[PLC连接] 断线事件订阅者异常: {_config.Name} - {eventEx.Message}");
+                        try
+                        {
+                            SafeEventDispatcher.Invoke(
+                                this,
+                                ConnectionStateChanged,
+                                false,
+                                ex => System.Diagnostics.Debug.WriteLine(
+                                    $"[PLC连接] 断线事件订阅者异常: {_config.Name} - {ex.Message}"));
+                        }
+                        catch (Exception eventEx)
+                        {
+                            System.Diagnostics.Debug.WriteLine(
+                                $"[PLC连接] 断线事件订阅者异常: {_config.Name} - {eventEx.Message}");
+                        }
                     }
                 }
             }
@@ -666,7 +759,7 @@ namespace MitsubishiMonitor.Demo.Services
             }, "PLC_IO");
         }
 
-        private bool HandleHardIoTimeout(
+        private DeferredDisconnectNotification HandleHardIoTimeout(
             PlcSession session,
             string operationName,
             int timeoutMs,
@@ -677,24 +770,30 @@ namespace MitsubishiMonitor.Demo.Services
             PlcSession sessionToClose;
             bool wasConnected;
             bool changed;
+            ConnectionPhaseChange phaseChange;
 
             lock (_sessionSync)
             {
                 if (!ReferenceEquals(_activeSession, session) ||
                     _connectionGeneration != session.Generation)
-                    return false;
+                    return default;
 
                 session.IoFailureVersion++;
                 changed = TrySetDisconnectedStateLocked(
                     reason,
                     session.Generation,
                     out sessionToClose,
-                    out wasConnected);
+                    out wasConnected,
+                    out phaseChange);
             }
 
-            if (changed)
-                CompleteDisconnectedState(sessionToClose, reason, notify: false, wasConnected: wasConnected);
-            return changed && wasConnected;
+            if (!changed)
+                return default;
+
+            // 立即废弃/关闭会话，但把所有外部事件留到 RunPlcCallAsync 的
+            // finally 释放本代 I/O 锁之后，避免订阅者重新进入连接 API 形成锁循环。
+            _ = StartBestEffortClose(sessionToClose, reason);
+            return new DeferredDisconnectNotification(phaseChange, wasConnected);
         }
 
         private Task StartBestEffortClose(PlcSession session, string reason)
@@ -771,6 +870,7 @@ namespace MitsubishiMonitor.Demo.Services
             PlcSession sessionToClose;
             bool wasConnected;
             bool changed;
+            ConnectionPhaseChange phaseChange;
 
             lock (_sessionSync)
             {
@@ -778,11 +878,12 @@ namespace MitsubishiMonitor.Demo.Services
                     reason,
                     expectedGeneration,
                     out sessionToClose,
-                    out wasConnected);
+                    out wasConnected,
+                    out phaseChange);
             }
 
             if (changed)
-                CompleteDisconnectedState(sessionToClose, reason, notify, wasConnected);
+                CompleteDisconnectedState(sessionToClose, phaseChange, reason, notify, wasConnected);
             return changed;
         }
 
@@ -793,46 +894,61 @@ namespace MitsubishiMonitor.Demo.Services
             string reason,
             long? expectedGeneration,
             out PlcSession sessionToClose,
-            out bool wasConnected)
+            out bool wasConnected,
+            out ConnectionPhaseChange phaseChange)
         {
             sessionToClose = null;
             wasConnected = false;
+            phaseChange = default;
 
             if (expectedGeneration.HasValue &&
                 _connectionGeneration != expectedGeneration.Value)
                 return false;
 
-            wasConnected = _isConnected || _status.IsConnected;
+            var currentSnapshot = Volatile.Read(ref _connectionSnapshot);
+            wasConnected = currentSnapshot.IsTransportUsable;
             sessionToClose = _activeSession;
+            var disconnectedGeneration = _connectionGeneration + 1;
+            var phase = Volatile.Read(ref _isDisposed) == 1
+                ? PlcConnectionPhase.Disposed
+                : reason != null && reason.Contains("用户主动断开", StringComparison.Ordinal)
+                    ? PlcConnectionPhase.Disconnected
+                    : PlcConnectionPhase.CommunicationFault;
+
+            if (!PlcConnectionTransitionPolicy.CanTransition(
+                    currentSnapshot.Generation,
+                    currentSnapshot.Phase,
+                    disconnectedGeneration,
+                    phase))
+                return false;
+
             _activeSession = null;
-            _connectionGeneration++;
+            _connectionGeneration = disconnectedGeneration;
             // 这是连接代次边界，不是同一连接的 Stop→Start。新代可以和
             // 旧代已脱离的同步调用并行恢复；旧 lane 的 finally 只会清掉
             // 自己的单调 acquisition token。
             Interlocked.Exchange(ref _xyReadToken, 0);
             Interlocked.Exchange(ref _temperatureReadToken, 0);
             Interlocked.Exchange(ref _auxiliaryReadToken, 0);
-            _isConnected = false;
-            _status.IsConnected = false;
             LastConnectionError = reason ?? "";
             _connectionFailureCount = Math.Min(1000, _connectionFailureCount + 1);
-            return true;
+            return TrySetConnectionPhaseLocked(
+                phase,
+                reason ?? "连接已断开",
+                disconnectedGeneration,
+                out phaseChange);
         }
 
         private void CompleteDisconnectedState(
             PlcSession sessionToClose,
+            ConnectionPhaseChange phaseChange,
             string reason,
             bool notify,
             bool wasConnected)
         {
             _ = StartBestEffortClose(sessionToClose, reason);
-            var phase = Volatile.Read(ref _isDisposed) == 1
-                ? PlcConnectionPhase.Disposed
-                : reason != null && reason.Contains("用户主动断开", StringComparison.Ordinal)
-                    ? PlcConnectionPhase.Disconnected
-                    : PlcConnectionPhase.CommunicationFault;
-            SetConnectionPhase(phase, reason ?? "连接已断开");
-            if (notify && wasConnected)
+            PublishConnectionPhaseChange(phaseChange);
+            if (notify && wasConnected && IsSnapshotCurrent(phaseChange.Snapshot))
                 SafeEventDispatcher.Invoke(
                     this,
                     ConnectionStateChanged,
@@ -841,8 +957,23 @@ namespace MitsubishiMonitor.Demo.Services
                         $"[PLC连接] 断线事件订阅者异常: {_config.Name} - {ex.Message}"));
         }
 
+        private bool IsConnectionCurrentLocked(long generation)
+        {
+            var snapshot = Volatile.Read(ref _connectionSnapshot);
+            return _activeSession != null &&
+                   _activeSession.Generation == generation &&
+                   _connectionGeneration == generation &&
+                   snapshot.Generation == generation &&
+                   snapshot.IsTransportUsable;
+        }
+
         private bool IsConnectionCurrent(long generation)
-            => _isConnected && Interlocked.Read(ref _connectionGeneration) == generation;
+        {
+            var snapshot = Volatile.Read(ref _connectionSnapshot);
+            return snapshot.Generation == generation &&
+                   snapshot.IsTransportUsable &&
+                   IsSessionActive(GetActiveSession(generation));
+        }
 
         private bool IsAcquisitionCurrent(long connectionGeneration, long acquisitionToken)
             => acquisitionToken != 0 &&
@@ -855,24 +986,29 @@ namespace MitsubishiMonitor.Demo.Services
         {
             lock (_sessionSync)
             {
-                if (!IsConnectionCurrent(expectedGeneration))
+                if (!IsConnectionCurrentLocked(expectedGeneration))
                     return false;
 
-                Interlocked.Exchange(
-                    ref _acquisitionStartedTimestamp,
-                    System.Diagnostics.Stopwatch.GetTimestamp());
-                Interlocked.Exchange(ref _lastTemperatureSampleTimestamp, 0);
-                Interlocked.Exchange(ref _lastAuxiliarySampleTimestamp, 0);
-                _status.LastTemperatureSampleTime = default;
-                _status.LastTemperatureSampleSequence = 0;
-                _status.LastTemperatureConnectionGeneration = expectedGeneration;
-                _status.LastTemperatureRawValue = 0;
-                _status.TemperatureQuality = TemperatureSampleQuality.Stale;
-                _status.LastTemperatureQualityReason = "新连接尚未取得温度样本";
-                _status.LastAuxiliarySampleTime = default;
-                _ioBaselineGeneration = 0;
+                ResetTemperatureFreshnessLocked(expectedGeneration);
                 return true;
             }
+        }
+
+        private void ResetTemperatureFreshnessLocked(long expectedGeneration)
+        {
+            Interlocked.Exchange(
+                ref _acquisitionStartedTimestamp,
+                System.Diagnostics.Stopwatch.GetTimestamp());
+            Interlocked.Exchange(ref _lastTemperatureSampleTimestamp, 0);
+            Interlocked.Exchange(ref _lastAuxiliarySampleTimestamp, 0);
+            _status.LastTemperatureSampleTime = default;
+            _status.LastTemperatureSampleSequence = 0;
+            _status.LastTemperatureConnectionGeneration = expectedGeneration;
+            _status.LastTemperatureRawValue = 0;
+            _status.TemperatureQuality = TemperatureSampleQuality.Stale;
+            _status.LastTemperatureQualityReason = "新连接尚未取得温度样本";
+            _status.LastAuxiliarySampleTime = default;
+            _ioBaselineGeneration = 0;
         }
 
         public async Task<bool> ConnectAsync()
@@ -894,33 +1030,48 @@ namespace MitsubishiMonitor.Demo.Services
                     LastConnectionError = _circuitBreakerReason;
                     return false;
                 }
-                if (_isConnected && _status.IsConnected)
+                if (ConnectionSnapshot.IsTransportUsable)
                     return true;
 
                 PlcSession previousSession;
+                ConnectionPhaseChange connectingChange;
                 lock (_sessionSync)
                 {
                     if (Volatile.Read(ref _isDisposed) == 1)
                         return false;
 
+                    if (IsConnectionCurrentLocked(_connectionGeneration))
+                        return true;
+
                     previousSession = _activeSession;
-                    var generation = Interlocked.Increment(ref _connectionGeneration);
+                    var currentSnapshot = Volatile.Read(ref _connectionSnapshot);
+                    var generation = _connectionGeneration + 1;
+                    if (!PlcConnectionTransitionPolicy.CanTransition(
+                            currentSnapshot.Generation,
+                            currentSnapshot.Phase,
+                            generation,
+                            PlcConnectionPhase.TcpConnecting))
+                        return false;
+
+                    // 先创建候选会话；构造失败时不推进代次，也不破坏当前快照。
+                    session = CreateSession(generation);
+                    _connectionGeneration = generation;
                     // 连接代次切换后允许新会话立即采集；旧代 lane 仍由自身
                     // finally 持有并释放旧令牌，且 acquisition token 单调递增，
                     // 不会误清新代令牌。
                     Interlocked.Exchange(ref _xyReadToken, 0);
                     Interlocked.Exchange(ref _temperatureReadToken, 0);
                     Interlocked.Exchange(ref _auxiliaryReadToken, 0);
-                    session = CreateSession(generation);
                     _activeSession = session;
-                    _isConnected = false;
-                    _status.IsConnected = false;
+                    if (!TrySetConnectionPhaseLocked(
+                            PlcConnectionPhase.TcpConnecting,
+                            "正在建立 TCP 会话",
+                            session.Generation,
+                            out connectingChange))
+                        throw new InvalidOperationException("无法进入 PLC TCP 连接阶段");
                 }
 
-                SetConnectionPhase(
-                    PlcConnectionPhase.TcpConnecting,
-                    "正在建立 TCP 会话",
-                    session.Generation);
+                PublishConnectionPhaseChange(connectingChange);
 
                 // 关闭旧会话不等待旧会话的 I/O 锁，也不阻塞新连接。
                 _ = StartBestEffortClose(previousSession, "建立新连接前废弃旧会话");
@@ -938,10 +1089,15 @@ namespace MitsubishiMonitor.Demo.Services
 
                 if (result.IsSuccess)
                 {
-                    SetConnectionPhase(
-                        PlcConnectionPhase.ProtocolVerifying,
-                        "TCP 已建立，正在验证 MC 协议",
-                        session.Generation);
+                    if (!TrySetConnectionPhase(
+                            PlcConnectionPhase.ProtocolVerifying,
+                            "TCP 已建立，正在验证 MC 协议",
+                            session.Generation,
+                            out _))
+                    {
+                        _ = StartBestEffortClose(session, "连接代次已变化，停止协议验证");
+                        return false;
+                    }
 
                     // 只读验证：不能仅凭 ConnectServer 把 Socket 在线当作 PLC 在线。
                     // 读取一个配置定义的 X 点不会改写现场状态，也能覆盖 MC 1E 请求/响应链路。
@@ -966,6 +1122,7 @@ namespace MitsubishiMonitor.Demo.Services
                         return false;
                     }
 
+                    ConnectionPhaseChange awaitingSampleChange;
                     lock (_sessionSync)
                     {
                         // ConnectServer 等待期间可能发生用户断开、超时废弃或 Dispose。
@@ -978,21 +1135,22 @@ namespace MitsubishiMonitor.Demo.Services
 
                         LastConnectionError = "";
                         _lastProtocolSuccessAt = DateTimeOffset.UtcNow;
-                        _isConnected = true;
-                        _status.IsConnected = true;
+                        // 每个新 TCP 会话都必须从“尚无本代温度样本”开始。
+                        // 新鲜度清理和 AwaitingFirstSample 快照在同一锁内提交。
+                        ResetTemperatureFreshnessLocked(session.Generation);
+                        if (!TrySetConnectionPhaseLocked(
+                                PlcConnectionPhase.AwaitingFirstSample,
+                                "MC 协议验证通过，等待本代首个温度样本",
+                                session.Generation,
+                                out awaitingSampleChange))
+                            return false;
                     }
 
-                    // 每个新 TCP 会话都必须从“尚无本代温度样本”开始。
-                    // 即使采集尚未启动，也不能让上一个会话的时间戳被 UI 当成实时数据。
-                    ResetTemperatureFreshness(session.Generation);
-
-                    if (!IsConnectionCurrent(session.Generation))
+                    PublishConnectionPhaseChange(awaitingSampleChange);
+                    var awaitingSnapshot = awaitingSampleChange.Snapshot;
+                    if (!IsSnapshotCurrent(awaitingSnapshot) ||
+                        !IsConnectionCurrent(session.Generation))
                         return false;
-
-                    SetConnectionPhase(
-                        PlcConnectionPhase.AwaitingFirstSample,
-                        "MC 协议验证通过，等待本代首个温度样本",
-                        session.Generation);
 
                     SafeEventDispatcher.Invoke(
                         this,
@@ -1001,7 +1159,8 @@ namespace MitsubishiMonitor.Demo.Services
                         ex => System.Diagnostics.Debug.WriteLine(
                             $"[PLC连接] 上线事件订阅者异常: {_config.Name} - {ex.Message}"));
                     System.Diagnostics.Debug.WriteLine($"[PLC连接] ✓ 连接成功: {_config.Name}");
-                    return IsConnectionCurrent(session.Generation);
+                    return IsSnapshotCurrent(awaitingSnapshot) &&
+                           IsConnectionCurrent(session.Generation);
                 }
                 else
                 {
@@ -1053,11 +1212,13 @@ namespace MitsubishiMonitor.Demo.Services
             bool wasConnected = false;
             bool shouldDisconnect = false;
             int failures;
+            ConnectionPhaseChange phaseChange = default;
 
             lock (_sessionSync)
             {
                 var session = _activeSession;
-                if (!_isConnected || session == null ||
+                if (session == null ||
+                    !IsConnectionCurrentLocked(session.Generation) ||
                     (expectedGeneration.HasValue && session.Generation != expectedGeneration.Value))
                     return;
 
@@ -1079,7 +1240,8 @@ namespace MitsubishiMonitor.Demo.Services
                             reason,
                             session.Generation,
                             out sessionToClose,
-                            out wasConnected);
+                            out wasConnected,
+                            out phaseChange);
                     }
                     else
                     {
@@ -1092,7 +1254,8 @@ namespace MitsubishiMonitor.Demo.Services
                         reason,
                         session.Generation,
                         out sessionToClose,
-                        out wasConnected);
+                        out wasConnected,
+                        out phaseChange);
                 }
             }
 
@@ -1111,7 +1274,12 @@ namespace MitsubishiMonitor.Demo.Services
                 return;
             }
 
-            CompleteDisconnectedState(sessionToClose, reason, notify: true, wasConnected: wasConnected);
+            CompleteDisconnectedState(
+                sessionToClose,
+                phaseChange,
+                reason,
+                notify: true,
+                wasConnected: wasConnected);
             System.Diagnostics.Debug.WriteLine($"[PLC连接] ✗ 自动检测离线: {_config.Name} - {reason}");
         }
 
@@ -2252,10 +2420,12 @@ namespace MitsubishiMonitor.Demo.Services
             TemperatureRegisterDefinition definition)
         {
             TemperatureSampleEventArgs sampleEvent;
+            ConnectionPhaseChange freshChange;
             lock (_sessionSync)
             {
                 var session = _activeSession;
-                if (!_isConnected || session == null ||
+                if (session == null ||
+                    !IsConnectionCurrentLocked(connectionGeneration) ||
                     session.Generation != connectionGeneration ||
                     !IsAcquisitionCurrent(connectionGeneration, acquisitionToken) ||
                     !float.IsFinite(temperature))
@@ -2306,14 +2476,23 @@ namespace MitsubishiMonitor.Demo.Services
                     RawDataType = definition?.DataType ?? PlcRegisterDataType.Int32,
                     Quality = TemperatureSampleQuality.Valid
                 };
+
+                // 样本、失败计数和 OnlineFresh 快照必须原子提交。旧实现先离开
+                // 会话锁再发布阶段，断线可能在缝隙中被旧样本覆盖为在线。
+                Interlocked.Exchange(ref _connectionFailureCount, 0);
+                var currentPhase = Volatile.Read(ref _connectionSnapshot).Phase;
+                var reason = currentPhase == PlcConnectionPhase.OnlineFresh
+                    ? "有效温度样本已刷新"
+                    : "本代首个有效温度样本已到达";
+                if (!TrySetConnectionPhaseLocked(
+                        PlcConnectionPhase.OnlineFresh,
+                        reason,
+                        connectionGeneration,
+                        out freshChange))
+                    return false;
             }
 
-            // 只有真正取得有效温度样本才说明连接已恢复，不能在 TCP 成功时清零失败状态。
-            Interlocked.Exchange(ref _connectionFailureCount, 0);
-            SetConnectionPhase(
-                PlcConnectionPhase.OnlineFresh,
-                "本代首个有效温度样本已到达",
-                connectionGeneration);
+            PublishConnectionPhaseChange(freshChange);
 
             // 温度采样事件（外部订阅者负责同步主界面并入队数据库）。
             // 辅助数据明确携带自己的时间与新鲜度；辅助失败不能阻止主温度发布。

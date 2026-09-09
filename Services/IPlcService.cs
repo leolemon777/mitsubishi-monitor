@@ -38,6 +38,12 @@ namespace MitsubishiMonitor.Demo.Services
         event EventHandler<StateChangeEvent> StateChanged;
 
         /// <summary>
+        /// 有效温度样本事件。真实 PLC 与演示数据源必须提供一致的采样契约，
+        /// 上层不得通过具体类型判断来订阅。
+        /// </summary>
+        event EventHandler<TemperatureSampleEventArgs> TemperatureSampled;
+
+        /// <summary>
         /// 连接到PLC
         /// </summary>
         Task<bool> ConnectAsync();

@@ -2,9 +2,11 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -43,6 +45,24 @@ namespace MitsubishiMonitor.Demo.Views
         private static string ResolveDbgLogPath()
         {
             string fileName = $"diagnostic-{DateTime.Now:yyyyMMdd}.log";
+
+            if (App.IsUiSmokeMode)
+            {
+                try
+                {
+                    var smokeDirectory = Path.Combine(
+                        Path.GetTempPath(),
+                        "MitsubishiMonitor",
+                        "UiSmoke",
+                        Environment.ProcessId.ToString());
+                    Directory.CreateDirectory(smokeDirectory);
+                    return Path.Combine(smokeDirectory, fileName);
+                }
+                catch
+                {
+                    // 继续走常规回退链；日志失败不能掩盖实际 UI 冒烟结果。
+                }
+            }
 
             // 候选目录按优先级：
             //   1) Environment.ProcessPath 同目录\logs   —— 最常规，部署到工控机时就是 publish\logs
@@ -427,14 +447,161 @@ namespace MitsubishiMonitor.Demo.Views
 
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                DbgLog("MainWindow:Loaded", "主窗口已加载，启动 UI 空闲后的自动连接", new
+                DbgLog("MainWindow:Loaded", App.IsUiSmokeMode
+                    ? "主窗口已加载，开始隔离 UI 冒烟"
+                    : "主窗口已加载，启动 UI 空闲后的自动连接", new
                 {
                     actualWidth = Math.Round(ActualWidth, 1),
                     actualHeight = Math.Round(ActualHeight, 1),
-                    windowState = WindowState.ToString()
+                    windowState = WindowState.ToString(),
+                    uiSmokeMode = App.IsUiSmokeMode
                 }, "STARTUP");
-                _viewModel.StartAutoConnectAfterUiReady();
+
+                if (App.IsUiSmokeMode)
+                    _ = RunUiSmokeAsync();
+                else
+                    _viewModel.StartAutoConnectAfterUiReady();
             }), DispatcherPriority.ApplicationIdle);
+        }
+
+        private async Task RunUiSmokeAsync()
+        {
+            var total = Stopwatch.StartNew();
+            try
+            {
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                EnsureSmokeWindowReady(this, "主窗口");
+                DbgLog("UI_SMOKE:MainWindow", "主窗口加载与布局通过", new
+                {
+                    elapsedMs = total.ElapsedMilliseconds
+                }, "UI_SMOKE");
+
+                var device = _viewModel.Devices.FirstOrDefault(item => !item.IsPlaceholder)
+                    ?? throw new InvalidOperationException("UI 冒烟找不到可用设备");
+
+                await SmokeDeviceDetailCommandAsync(device);
+                await SmokeWindowAsync("系统设置", () =>
+                    new SettingsDialog(_viewModel.DeviceManager));
+                await SmokeWindowAsync("日志查询", () =>
+                    new LogQueryWindow(_viewModel.DeviceManager));
+
+                DbgLog("UI_SMOKE:PASS", "主要点击开窗链路全部通过", new
+                {
+                    elapsedMs = total.ElapsedMilliseconds,
+                    windows = new[] { "MainWindow", "DeviceDetailWindow", "SettingsDialog", "LogQueryWindow" },
+                    productionConfigTouched = false,
+                    plcConnectionAttempted = false
+                }, "UI_SMOKE");
+                FlushDiagnosticLogQueue();
+                Application.Current.Shutdown(0);
+            }
+            catch (Exception ex)
+            {
+                DbgLog("UI_SMOKE:FAIL", "UI 冒烟失败", new
+                {
+                    elapsedMs = total.ElapsedMilliseconds,
+                    error = ex.Message,
+                    type = ex.GetType().FullName,
+                    stack = ex.StackTrace
+                }, "UI_SMOKE");
+                FlushDiagnosticLogQueue();
+                Application.Current.Shutdown(2);
+            }
+        }
+
+        private async Task SmokeDeviceDetailCommandAsync(Device device)
+        {
+            var elapsed = Stopwatch.StartNew();
+            var completion = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // 先排入一个低优先级关闭动作，再执行真实 RelayCommand。ShowDialog 进入嵌套
+            // Dispatcher 后，该动作会在窗口完成 Loaded/Render 后验证并安全关闭它。
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                DeviceDetailWindow detailWindow = null;
+                try
+                {
+                    detailWindow = Application.Current.Windows
+                        .OfType<DeviceDetailWindow>()
+                        .FirstOrDefault(window => window.IsVisible);
+                    if (detailWindow == null)
+                        throw new InvalidOperationException("设备详情命令未显示详情窗口");
+
+                    detailWindow.UpdateLayout();
+                    EnsureSmokeWindowReady(detailWindow, "设备详情");
+                    DbgLog("UI_SMOKE:DeviceDetailWindow", "设备详情真实模态命令加载与布局通过", new
+                    {
+                        elapsedMs = elapsed.ElapsedMilliseconds,
+                        actualWidth = Math.Round(detailWindow.ActualWidth, 1),
+                        actualHeight = Math.Round(detailWindow.ActualHeight, 1)
+                    }, "UI_SMOKE");
+                    detailWindow.Close();
+                    completion.TrySetResult(true);
+                }
+                catch (Exception ex)
+                {
+                    try { detailWindow?.Close(); } catch { }
+                    completion.TrySetException(ex);
+                }
+            }), DispatcherPriority.ApplicationIdle);
+
+            _viewModel.OpenDeviceDetailCommand.Execute(device);
+            await completion.Task;
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        }
+
+        private async Task SmokeWindowAsync(string name, Func<Window> factory)
+        {
+            Window window = null;
+            var elapsed = Stopwatch.StartNew();
+            try
+            {
+                window = factory();
+                window.Owner = this;
+                window.WindowStartupLocation = WindowStartupLocation.CenterOwner;
+                window.ShowInTaskbar = false;
+                window.Show();
+
+                await Dispatcher.Yield(DispatcherPriority.Loaded);
+                window.UpdateLayout();
+                await Task.Delay(150);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                window.UpdateLayout();
+                EnsureSmokeWindowReady(window, name);
+
+                DbgLog($"UI_SMOKE:{window.GetType().Name}", $"{name}加载与布局通过", new
+                {
+                    elapsedMs = elapsed.ElapsedMilliseconds,
+                    actualWidth = Math.Round(window.ActualWidth, 1),
+                    actualHeight = Math.Round(window.ActualHeight, 1)
+                }, "UI_SMOKE");
+            }
+            finally
+            {
+                if (window != null)
+                {
+                    try { window.Close(); }
+                    catch (Exception closeError)
+                    {
+                        DbgLog("UI_SMOKE:Close", $"关闭{name}时出现异常", new
+                        {
+                            error = closeError.Message
+                        }, "UI_SMOKE");
+                    }
+                }
+
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            }
+        }
+
+        private static void EnsureSmokeWindowReady(Window window, string name)
+        {
+            if (!window.IsLoaded || !window.IsVisible || PresentationSource.FromVisual(window) == null)
+            {
+                throw new InvalidOperationException(
+                    $"{name}未完成 WPF 加载/可见/呈现源检查（Loaded={window.IsLoaded}, Visible={window.IsVisible}）");
+            }
         }
 
         private void UpdateClock(object sender, EventArgs e)
@@ -485,27 +652,53 @@ namespace MitsubishiMonitor.Demo.Views
 
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
-            // 弹出设置对话框，传入 DeviceManager 以便保存后立即生效
-            var dialog = new SettingsDialog(_viewModel.DeviceManager)
+            var elapsed = Stopwatch.StartNew();
+            try
             {
-                Owner = this,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner
-            };
-            dialog.ShowDialog();
+                DbgLog("MainWindow:Settings", "开始打开系统设置", new { }, "WINDOW_OPEN");
+                var dialog = new SettingsDialog(_viewModel.DeviceManager)
+                {
+                    Owner = this,
+                    WindowStartupLocation = WindowStartupLocation.CenterOwner
+                };
+                dialog.ShowDialog();
+                DbgLog("MainWindow:Settings", "系统设置窗口已关闭", new
+                {
+                    elapsedMs = elapsed.ElapsedMilliseconds
+                }, "WINDOW_OPEN");
+            }
+            catch (Exception ex)
+            {
+                DbgLog("MainWindow:Settings", "打开系统设置失败", new
+                {
+                    elapsedMs = elapsed.ElapsedMilliseconds,
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                }, "WINDOW_OPEN");
+                MessageBox.Show($"打开系统设置失败:\n{ex.Message}", "错误",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private void LogQuery_Click(object sender, RoutedEventArgs e)
         {
             try
             {
+                DbgLog("MainWindow:LogQuery", "开始打开日志查询", new { }, "WINDOW_OPEN");
                 var win = new LogQueryWindow(_viewModel.DeviceManager)
                 {
                     Owner = this
                 };
                 win.Show();
+                DbgLog("MainWindow:LogQuery", "日志查询窗口已显示", new { }, "WINDOW_OPEN");
             }
             catch (Exception ex)
             {
+                DbgLog("MainWindow:LogQuery", "打开日志查询失败", new
+                {
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                }, "WINDOW_OPEN");
                 MessageBox.Show($"打开日志查询页失败:\n{ex.Message}", "错误",
                     MessageBoxButton.OK, MessageBoxImage.Error);
             }

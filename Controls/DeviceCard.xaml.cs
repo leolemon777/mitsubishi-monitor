@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace MitsubishiMonitor.Demo.Controls
 {
@@ -30,14 +31,7 @@ namespace MitsubishiMonitor.Demo.Controls
                 UpdateCardChrome();
             };
             RootBorder.PreviewMouseLeftButtonDown += OnRootPreviewMouseLeftButtonDown;
-            RootBorder.MouseLeftButtonUp += (_, _) =>
-            {
-                _cardPressed = false;
-                UpdateCardChrome();
-            };
-
-            // 点击卡片触发详情命令
-            RootBorder.MouseLeftButtonDown += OnCardClick;
+            RootBorder.MouseLeftButtonUp += OnRootMouseLeftButtonUp;
         }
 
         /// <summary>
@@ -116,10 +110,38 @@ namespace MitsubishiMonitor.Demo.Controls
         private void OnRootPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (e.OriginalSource is not DependencyObject src) return;
-            if (src is FrameworkElement fe && FindParent<Button>(fe) != null)
+            if (FindParent<Button>(src) != null)
                 return;
             _cardPressed = true;
             UpdateCardChrome();
+        }
+
+        private void OnRootMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            var shouldOpen = _cardPressed && e.ChangedButton == MouseButton.Left;
+            _cardPressed = false;
+            UpdateCardChrome();
+
+            if (!shouldOpen || e.OriginalSource is not DependencyObject source)
+                return;
+            if (FindParent<Button>(source) != null)
+                return;
+
+            var parameter = DataContext;
+            if (parameter is Models.Device { IsPlaceholder: true })
+                return;
+
+            var command = DetailCommand;
+            if (command == null || !command.CanExecute(parameter))
+                return;
+
+            // 详情窗口是模态窗口。必须等本次 MouseUp 完整退栈后再进入嵌套消息循环，
+            // 否则按压状态与输入路由停留在半完成状态，看起来像“点击后卡死”。
+            Dispatcher.BeginInvoke(new System.Action(() =>
+            {
+                if (command.CanExecute(parameter))
+                    command.Execute(parameter);
+            }), DispatcherPriority.Background);
         }
 
         #region 依赖属性
@@ -288,37 +310,26 @@ namespace MitsubishiMonitor.Demo.Controls
 
         #region 事件处理
 
-        private void OnCardClick(object sender, MouseButtonEventArgs e)
-        {
-            if (DataContext is Models.Device device && device.IsPlaceholder) return;
-
-            // 如果点击的是按钮,不触发详情命令
-            if (e.OriginalSource is FrameworkElement element)
-            {
-                // 检查是否点击在按钮上
-                var button = FindParent<Button>(element);
-                if (button != null)
-                {
-                    return;
-                }
-            }
-
-            // 触发详情命令
-            if (DetailCommand != null && DetailCommand.CanExecute(DataContext))
-            {
-                DetailCommand.Execute(DataContext);
-            }
-        }
-
         /// <summary>
-        /// 查找父级元素
+        /// 查找当前元素或父级元素；兼容 TextBlock、Run 等可成为点击源的内容元素。
         /// </summary>
         private T FindParent<T>(DependencyObject child) where T : DependencyObject
         {
-            var parent = System.Windows.Media.VisualTreeHelper.GetParent(child);
-            if (parent == null) return null;
-            if (parent is T typedParent) return typedParent;
-            return FindParent<T>(parent);
+            while (child != null)
+            {
+                if (child is T typedParent)
+                    return typedParent;
+
+                child = child switch
+                {
+                    ContentElement content => ContentOperations.GetParent(content),
+                    FrameworkElement element =>
+                        element.Parent ?? System.Windows.Media.VisualTreeHelper.GetParent(element),
+                    _ => System.Windows.Media.VisualTreeHelper.GetParent(child)
+                };
+            }
+
+            return null;
         }
 
         #endregion

@@ -41,8 +41,11 @@ namespace MitsubishiMonitor.Demo.Views
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"初始化设备详情窗口失败:\n{ex.Message}\n\n{ex.StackTrace}",
-                    "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                if (!App.IsUiSmokeMode)
+                {
+                    MessageBox.Show($"初始化设备详情窗口失败:\n{ex.Message}\n\n{ex.StackTrace}",
+                        "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
                 throw;
             }
         }

@@ -15,6 +15,9 @@ namespace MitsubishiMonitor.Demo.Services
     {
         private readonly int _deviceId;
         private readonly PlcStatus _status;
+        private readonly object _stateSync = new();
+        private PlcConnectionSnapshot _connectionSnapshot =
+            new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "演示尚未连接", 0, null, null);
         private System.Threading.Timer _timer;
         private int _tick;
         private int _isUpdating;
@@ -29,53 +32,99 @@ namespace MitsubishiMonitor.Demo.Services
         public PlcStatus CurrentStatus => _status;
         public PlcConfig Config { get; }
         public bool IsAcquiring { get; private set; }
-        public PlcConnectionSnapshot ConnectionSnapshot { get; private set; } =
-            new PlcConnectionSnapshot(0, PlcConnectionPhase.Disconnected, "演示尚未连接", 0, null, null, null);
+        public PlcConnectionSnapshot ConnectionSnapshot => Volatile.Read(ref _connectionSnapshot);
 
         public event EventHandler<bool> ConnectionStateChanged;
         public event EventHandler<PlcConnectionChangedEventArgs> ConnectionStateChangedDetailed;
         public event EventHandler<StateChangeEvent> StateChanged;
         public event EventHandler<TemperatureSampleEventArgs> TemperatureSampled;
 
+        private bool TryTransition(
+            long generation,
+            PlcConnectionPhase phase,
+            string reason,
+            DateTimeOffset? lastProtocolSuccessAt = null,
+            DateTimeOffset? lastTemperatureSampleAt = null,
+            bool notifyDetailed = true)
+        {
+            PlcConnectionSnapshot snapshot;
+            lock (_stateSync)
+            {
+                var current = Volatile.Read(ref _connectionSnapshot);
+                if (!PlcConnectionTransitionPolicy.CanTransition(
+                        current.Generation,
+                        current.Phase,
+                        generation,
+                        phase))
+                    return false;
+
+                snapshot = new PlcConnectionSnapshot(
+                    generation,
+                    phase,
+                    reason,
+                    0,
+                    lastProtocolSuccessAt ?? current.LastProtocolSuccessAt,
+                    lastTemperatureSampleAt ?? current.LastTemperatureSampleAt);
+                Volatile.Write(ref _connectionSnapshot, snapshot);
+                if (_status.IsConnected != snapshot.IsTransportUsable)
+                    _status.IsConnected = snapshot.IsTransportUsable;
+            }
+
+            if (!ReferenceEquals(ConnectionSnapshot, snapshot))
+                return false;
+
+            if (notifyDetailed)
+            {
+                SafeEventDispatcher.Invoke(
+                    this,
+                    ConnectionStateChangedDetailed,
+                    new PlcConnectionChangedEventArgs(snapshot));
+            }
+
+            return ReferenceEquals(ConnectionSnapshot, snapshot);
+        }
+
         public Task<bool> ConnectAsync()
         {
-            if (!_status.IsConnected)
-            {
-                _status.IsConnected = true;
-                ConnectionSnapshot = new PlcConnectionSnapshot(
-                    ConnectionSnapshot.Generation + 1,
-                    PlcConnectionPhase.OnlineFresh,
-                    "演示连接",
-                    0,
-                    null,
-                    DateTimeOffset.UtcNow,
-                    DateTimeOffset.UtcNow);
-                ApplyFrame(raisePointEvents: false);
-                SafeEventDispatcher.Invoke(this, ConnectionStateChangedDetailed,
-                    new PlcConnectionChangedEventArgs(ConnectionSnapshot));
-                SafeEventDispatcher.Invoke(this, ConnectionStateChanged, true);
-            }
-            return Task.FromResult(true);
+            var current = ConnectionSnapshot;
+            if (current.IsTransportUsable)
+                return Task.FromResult(true);
+
+            var generation = current.Generation + 1;
+            if (!TryTransition(generation, PlcConnectionPhase.TcpConnecting, "演示 TCP 连接") ||
+                !TryTransition(generation, PlcConnectionPhase.ProtocolVerifying, "演示协议验证") ||
+                !TryTransition(
+                    generation,
+                    PlcConnectionPhase.AwaitingFirstSample,
+                    "演示等待首个样本",
+                    lastProtocolSuccessAt: DateTimeOffset.UtcNow))
+                return Task.FromResult(false);
+
+            ApplyFrame(raisePointEvents: false);
+            var connectedSnapshot = ConnectionSnapshot;
+            if (!connectedSnapshot.IsDataFresh || connectedSnapshot.Generation != generation)
+                return Task.FromResult(false);
+
+            SafeEventDispatcher.Invoke(this, ConnectionStateChanged, true);
+            return Task.FromResult(
+                ReferenceEquals(ConnectionSnapshot, connectedSnapshot) &&
+                CurrentStatus.IsConnected);
         }
 
         public void Disconnect()
         {
             StopAcquisition();
-            if (_status.IsConnected)
-            {
-                _status.IsConnected = false;
-                ConnectionSnapshot = new PlcConnectionSnapshot(
-                    ConnectionSnapshot.Generation,
+            var current = ConnectionSnapshot;
+            if (current.Phase == PlcConnectionPhase.Disconnected)
+                return;
+
+            var wasConnected = current.IsTransportUsable;
+            if (TryTransition(
+                    current.Generation + 1,
                     PlcConnectionPhase.Disconnected,
-                    "演示断开",
-                    0,
-                    null,
-                    ConnectionSnapshot.LastProtocolSuccessAt,
-                    ConnectionSnapshot.LastTemperatureSampleAt);
-                SafeEventDispatcher.Invoke(this, ConnectionStateChangedDetailed,
-                    new PlcConnectionChangedEventArgs(ConnectionSnapshot));
+                    "演示断开") &&
+                wasConnected)
                 SafeEventDispatcher.Invoke(this, ConnectionStateChanged, false);
-            }
         }
 
         public Task<bool[]> ReadXPointsAsync() => Task.FromResult((bool[])_status.X.Clone());
@@ -141,14 +190,15 @@ namespace MitsubishiMonitor.Demo.Services
                 _status.LastTemperatureSampleSequence++;
                 _status.LastTemperatureConnectionGeneration = ConnectionSnapshot.Generation;
                 _status.TemperatureQuality = TemperatureSampleQuality.Valid;
-                ConnectionSnapshot = new PlcConnectionSnapshot(
-                    ConnectionSnapshot.Generation,
-                    PlcConnectionPhase.OnlineFresh,
-                    "演示数据持续刷新",
-                    0,
-                    null,
-                    ConnectionSnapshot.LastProtocolSuccessAt ?? DateTimeOffset.UtcNow,
-                    new DateTimeOffset(now));
+                var currentSnapshot = ConnectionSnapshot;
+                if (!TryTransition(
+                        currentSnapshot.Generation,
+                        PlcConnectionPhase.OnlineFresh,
+                        "演示数据持续刷新",
+                        currentSnapshot.LastProtocolSuccessAt ?? DateTimeOffset.UtcNow,
+                        new DateTimeOffset(now),
+                        notifyDetailed: currentSnapshot.Phase != PlcConnectionPhase.OnlineFresh))
+                    return;
 
                 SafeEventDispatcher.Invoke(this, TemperatureSampled, new TemperatureSampleEventArgs
                 {

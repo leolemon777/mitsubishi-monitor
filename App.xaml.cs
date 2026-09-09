@@ -18,13 +18,20 @@ namespace MitsubishiMonitor.Demo
         public static bool IsDemoVideoMode { get; private set; }
 
         /// <summary>
+        /// UI 冒烟模式会在完全隔离的演示环境中依次加载主要窗口，然后自动退出。
+        /// </summary>
+        public static bool IsUiSmokeMode { get; private set; }
+
+        /// <summary>
         /// HslCommunication 使用同步阻塞 API，4 路 PLC 加上数据库/串口任务可能暂时占用多个工作线程。
         /// 将 worker 最小值适度提高到 16，减少冷启动时的线程注入延迟；不修改 IO completion-port
         /// 最小值，因为当前 PLC 调用并不使用异步 IO completion port。WPF Dispatcher 仍是独立 UI 线程。
         /// </summary>
         protected override void OnStartup(StartupEventArgs e)
         {
-            IsDemoVideoMode = e.Args.Any(arg =>
+            IsUiSmokeMode = e.Args.Any(arg =>
+                string.Equals(arg, "--ui-smoke", System.StringComparison.OrdinalIgnoreCase));
+            IsDemoVideoMode = IsUiSmokeMode || e.Args.Any(arg =>
                 string.Equals(arg, "--demo-video", System.StringComparison.OrdinalIgnoreCase));
 
             if (!SingleInstanceGuard.TryAcquire(out _singleInstanceGuard, out var singleInstanceError))

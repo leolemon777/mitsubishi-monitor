@@ -442,6 +442,78 @@ namespace MitsubishiMonitor.Demo.Tests
             Assert.True(service.CurrentStatus.IsConnected);
         }
 
+        [Fact]
+        public async Task ReentrantDisconnectDuringSampleCommit_CannotRestoreOldGenerationOnlineState()
+        {
+            var transport = new FakeTransport { TemperatureRaw = 500 };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var snapshots = new ConcurrentQueue<PlcConnectionSnapshot>();
+            var disconnectTriggered = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var triggerCount = 0;
+
+            service.ConnectionStateChangedDetailed += (_, args) => snapshots.Enqueue(args.Snapshot);
+            service.CurrentStatus.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(PlcStatus.LastTemperatureSampleTime) &&
+                    service.CurrentStatus.LastTemperatureSampleTime != default &&
+                    Interlocked.Exchange(ref triggerCount, 1) == 0)
+                {
+                    // PlcStatus 在样本提交临界区内通知。利用同步回调在旧实现的
+                    // “状态数据已写入、OnlineFresh 尚未发布”窗口中主动断线。
+                    service.Disconnect();
+                    disconnectTriggered.TrySetResult();
+                }
+            };
+
+            Assert.True(await service.ConnectAsync());
+            service.StartAcquisition();
+            await disconnectTriggered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(await WaitUntilAsync(
+                () => service.ConnectionSnapshot.Phase == PlcConnectionPhase.Disconnected,
+                TimeSpan.FromSeconds(1)));
+
+            var finalSnapshot = service.ConnectionSnapshot;
+            Assert.False(service.CurrentStatus.IsConnected);
+            Assert.Equal(PlcConnectionPhase.Disconnected, finalSnapshot.Phase);
+            Assert.DoesNotContain(
+                snapshots,
+                snapshot => snapshot.Generation < finalSnapshot.Generation &&
+                            snapshot.Phase == PlcConnectionPhase.OnlineFresh);
+        }
+
+        [Fact]
+        public async Task ReentrantDisconnectFromOnlineProjection_CannotOverwriteNewerDisconnectedSnapshot()
+        {
+            var transport = new FakeTransport { TemperatureRaw = 500 };
+            var factory = new QueueTransportFactory(transport);
+            using var service = CreateService(factory, ioTimeoutMs: 1000);
+            var snapshots = new ConcurrentQueue<PlcConnectionSnapshot>();
+            var triggerCount = 0;
+
+            service.ConnectionStateChangedDetailed += (_, args) => snapshots.Enqueue(args.Snapshot);
+            service.CurrentStatus.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName == nameof(PlcStatus.IsConnected) &&
+                    service.CurrentStatus.IsConnected &&
+                    Interlocked.Exchange(ref triggerCount, 1) == 0)
+                {
+                    service.Disconnect();
+                }
+            };
+
+            Assert.False(await service.ConnectAsync());
+
+            var finalSnapshot = service.ConnectionSnapshot;
+            Assert.False(service.CurrentStatus.IsConnected);
+            Assert.Equal(PlcConnectionPhase.Disconnected, finalSnapshot.Phase);
+            Assert.DoesNotContain(
+                snapshots,
+                snapshot => snapshot.Generation < finalSnapshot.Generation &&
+                            snapshot.IsTransportUsable);
+        }
+
         private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
         {
             var sw = Stopwatch.StartNew();

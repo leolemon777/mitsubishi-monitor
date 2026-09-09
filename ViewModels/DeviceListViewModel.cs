@@ -308,6 +308,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [RelayCommand]
         private void OpenDeviceDetail(Device device)
         {
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 if (device == null || device.IsPlaceholder)
@@ -319,18 +320,44 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     return;
                 }
 
+                Views.MainWindow.DbgLog("DeviceListVM:Detail", "开始打开设备详情", new
+                {
+                    device.Id,
+                    device.Name
+                }, "WINDOW_OPEN");
+
                 // 打开详情窗口，传入设备和设备管理器
                 var detailWindow = new Views.DeviceDetailWindow(device, _deviceManager);
+                Views.MainWindow.DbgLog("DeviceListVM:Detail", "设备详情窗口构造完成", new
+                {
+                    device.Id,
+                    elapsedMs = elapsed.ElapsedMilliseconds
+                }, "WINDOW_OPEN");
 
                 // 设置Owner为当前活动窗口，确保详情窗口显示在主窗口前面
                 detailWindow.Owner = Application.Current.MainWindow;
                 detailWindow.WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
                 detailWindow.ShowDialog();
+                Views.MainWindow.DbgLog("DeviceListVM:Detail", "设备详情窗口已关闭", new
+                {
+                    device.Id,
+                    elapsedMs = elapsed.ElapsedMilliseconds
+                }, "WINDOW_OPEN");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"打开设备详情失败:\n{ex.Message}\n\n堆栈:\n{ex.StackTrace}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                Views.MainWindow.DbgLog("DeviceListVM:Detail", "打开设备详情失败", new
+                {
+                    deviceId = device?.Id,
+                    elapsedMs = elapsed.ElapsedMilliseconds,
+                    error = ex.Message,
+                    stack = ex.StackTrace
+                }, "WINDOW_OPEN");
+                if (!App.IsUiSmokeMode)
+                {
+                    MessageBox.Show($"打开设备详情失败:\n{ex.Message}\n\n堆栈:\n{ex.StackTrace}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
                 System.Diagnostics.Debug.WriteLine($"打开设备详情异常: {ex}");
             }
         }
