@@ -327,7 +327,7 @@ namespace MitsubishiMonitor.Demo.Services
             var sheet = workbook.Worksheets.Add("温度记录");
             WriteHeader(
                 sheet,
-                new[] { "序号", "设备名", "温度(°C)", "热电偶A(V)", "热电偶B(V)", "热电偶C(V)", "是否异常", "记录时间" },
+                new[] { "序号", "设备名", "温度(°C)", "热电偶A(V)", "热电偶B(V)", "热电偶C(V)", "是否异常", "记录时间", "报警阈值(°C)", "目标温度(°C)", "辅助采样时间", "辅助质量" },
                 "#F0883E");
 
             for (var i = 0; i < logs.Count; i++)
@@ -339,17 +339,28 @@ namespace MitsubishiMonitor.Demo.Services
                 sheet.Cell(row, 1).Value = i + 1;
                 SetSafeText(sheet.Cell(row, 2), deviceName);
                 sheet.Cell(row, 3).Value = log.Temperature;
-                sheet.Cell(row, 4).Value = log.ThermocoupleA;
-                sheet.Cell(row, 5).Value = log.ThermocoupleB;
-                sheet.Cell(row, 6).Value = log.ThermocoupleC;
+                if (log.HasUsableAuxiliaryData)
+                {
+                    sheet.Cell(row, 4).Value = log.ThermocoupleA;
+                    sheet.Cell(row, 5).Value = log.ThermocoupleB;
+                    sheet.Cell(row, 6).Value = log.ThermocoupleC;
+                    sheet.Cell(row, 10).Value = log.TargetTemperature;
+                }
+                else
+                {
+                    foreach (var column in new[] { 4, 5, 6, 10 }) SetSafeText(sheet.Cell(row, column), "—");
+                }
                 SetSafeText(sheet.Cell(row, 7), log.IsAbnormal ? "是" : "否");
                 sheet.Cell(row, 8).Value = log.RecordTime;
                 sheet.Cell(row, 8).Style.DateFormat.Format = "yyyy-mm-dd hh:mm:ss";
+                sheet.Cell(row, 9).Value = log.AlarmThreshold;
+                SetSafeText(sheet.Cell(row, 11), log.AuxiliarySampleTimeDisplay);
+                SetSafeText(sheet.Cell(row, 12), log.AuxiliaryQualityDisplay);
                 if (log.IsAbnormal)
                     sheet.Cell(row, 3).Style.Font.FontColor = XLColor.Red;
             }
 
-            FinishDataSheet(sheet, new[] { 9d, 22d, 14d, 14d, 14d, 14d, 12d, 22d });
+            FinishDataSheet(sheet, new[] { 9d, 22d, 14d, 14d, 14d, 14d, 12d, 22d, 18d, 18d, 24d, 18d });
         }
 
         private static void WriteOperationSheet(
@@ -484,13 +495,13 @@ namespace MitsubishiMonitor.Demo.Services
             }
         }
 
-        private static string BuildTemperatureCsv(
+        internal static string BuildTemperatureCsv(
             List<TemperatureLog> logs,
             string fallbackDeviceName,
             CancellationToken cancellationToken)
         {
             var builder = new StringBuilder();
-            builder.AppendLine("序号,设备名,温度(℃),热电偶A(V),热电偶B(V),热电偶C(V),是否异常,记录时间");
+            builder.AppendLine("序号,设备名,温度(℃),热电偶A(V),热电偶B(V),热电偶C(V),是否异常,记录时间,报警阈值(℃),目标温度(℃),辅助采样时间,辅助质量");
             for (var i = 0; i < logs.Count; i++)
             {
                 CheckCancellation(i, cancellationToken);
@@ -500,11 +511,13 @@ namespace MitsubishiMonitor.Demo.Services
                     Csv(i + 1),
                     Csv(deviceName),
                     Csv(log.Temperature.ToString("F1", CultureInfo.InvariantCulture)),
-                    Csv(log.ThermocoupleA.ToString("F3", CultureInfo.InvariantCulture)),
-                    Csv(log.ThermocoupleB.ToString("F3", CultureInfo.InvariantCulture)),
-                    Csv(log.ThermocoupleC.ToString("F3", CultureInfo.InvariantCulture)),
+                    Csv(log.ThermocoupleADisplay),
+                    Csv(log.ThermocoupleBDisplay),
+                    Csv(log.ThermocoupleCDisplay),
                     Csv(log.IsAbnormal ? "是" : "否"),
-                    Csv(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))));
+                    Csv(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss")),
+                    Csv(log.AlarmThreshold.ToString("F1", CultureInfo.InvariantCulture)),
+                    Csv(log.TargetTemperatureDisplay), Csv(log.AuxiliarySampleTimeDisplay), Csv(log.AuxiliaryQualityDisplay)));
             }
             return builder.ToString();
         }
@@ -535,7 +548,7 @@ namespace MitsubishiMonitor.Demo.Services
             return builder.ToString();
         }
 
-        private static string BuildReadableHtml(
+        internal static string BuildReadableHtml(
             string title,
             DateTime startTime,
             DateTime endTime,
@@ -605,7 +618,7 @@ namespace MitsubishiMonitor.Demo.Services
             }
             else
             {
-                builder.AppendLine("<table><thead><tr><th>序号</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>记录时间</th></tr></thead><tbody>");
+                builder.AppendLine("<table><thead><tr><th>序号</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>记录时间</th><th>报警阈值(℃)</th><th>目标温度(℃)</th><th>辅助采样时间</th><th>辅助质量</th></tr></thead><tbody>");
                 for (var i = 0; i < tempLogs.Count; i++)
                 {
                     CheckCancellation(i, cancellationToken);
@@ -614,9 +627,11 @@ namespace MitsubishiMonitor.Demo.Services
                     var abnormalClass = log.IsAbnormal ? " class=\"bad\"" : "";
                     builder.AppendLine("<tr>" +
                         $"<td>{i + 1}</td><td>{Html(deviceName)}</td><td{abnormalClass}>{Html(log.Temperature.ToString("F1", CultureInfo.InvariantCulture))}</td>" +
-                        $"<td>{Html(log.ThermocoupleA.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.ThermocoupleB.ToString("F3", CultureInfo.InvariantCulture))}</td>" +
-                        $"<td>{Html(log.ThermocoupleC.ToString("F3", CultureInfo.InvariantCulture))}</td><td>{Html(log.IsAbnormal ? "是" : "否")}</td>" +
-                        $"<td>{Html(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td></tr>");
+                        $"<td>{Html(log.ThermocoupleADisplay)}</td><td>{Html(log.ThermocoupleBDisplay)}</td>" +
+                        $"<td>{Html(log.ThermocoupleCDisplay)}</td><td>{Html(log.IsAbnormal ? "是" : "否")}</td>" +
+                        $"<td>{Html(log.RecordTime.ToString("yyyy-MM-dd HH:mm:ss"))}</td>" +
+                        $"<td>{log.AlarmThreshold.ToString("F1", CultureInfo.InvariantCulture)}</td><td>{Html(log.TargetTemperatureDisplay)}</td>" +
+                        $"<td>{Html(log.AuxiliarySampleTimeDisplay)}</td><td>{Html(log.AuxiliaryQualityDisplay)}</td></tr>");
                 }
                 builder.AppendLine("</tbody></table>");
             }

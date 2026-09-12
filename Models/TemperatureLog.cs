@@ -1,4 +1,6 @@
 using System;
+using System.ComponentModel.DataAnnotations.Schema;
+using System.Globalization;
 
 namespace MitsubishiMonitor.Demo.Models
 {
@@ -68,6 +70,28 @@ namespace MitsubishiMonitor.Demo.Models
 
         /// <summary>写入时辅助遥测是否满足本轮新鲜度要求。</summary>
         public bool HasFreshAuxiliaryData { get; set; }
+
+        [NotMapped]
+        public bool HasUsableAuxiliaryData => HasFreshAuxiliaryData && AuxiliarySampleTime.HasValue &&
+            AuxiliarySampleTime.Value <= RecordTime && float.IsFinite(TargetTemperature) &&
+            float.IsFinite(ThermocoupleA) && float.IsFinite(ThermocoupleB) && float.IsFinite(ThermocoupleC);
+
+        [NotMapped]
+        public string AuxiliaryQualityDisplay => HasUsableAuxiliaryData ? "有效" :
+            AuxiliarySampleTime.HasValue ? "过期或无效" : "未采集";
+        [NotMapped]
+        public string AuxiliarySampleTimeDisplay => AuxiliarySampleTime?.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) ?? "—";
+        [NotMapped]
+        public string ThermocoupleADisplay => FormatAuxiliaryValue(ThermocoupleA, "F3");
+        [NotMapped]
+        public string ThermocoupleBDisplay => FormatAuxiliaryValue(ThermocoupleB, "F3");
+        [NotMapped]
+        public string ThermocoupleCDisplay => FormatAuxiliaryValue(ThermocoupleC, "F3");
+        [NotMapped]
+        public string TargetTemperatureDisplay => FormatAuxiliaryValue(TargetTemperature, "F1");
+
+        private string FormatAuxiliaryValue(float value, string format)
+            => HasUsableAuxiliaryData ? value.ToString(format, CultureInfo.InvariantCulture) : "—";
 
         /// <summary>
         /// 格式化的温度显示

@@ -20,9 +20,13 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly ConcurrentQueue<OperationLog> _operationLogQueue = new();
         private readonly ConcurrentQueue<TemperatureLog> _temperatureLogQueue = new();
         private readonly System.Timers.Timer _flushTimer;
-        private readonly DurableLogSpool _spool;
+        private DurableLogSpool _spool;
+        private readonly object _queueSync = new();
+        private readonly string _databasePath;
+        private readonly Func<List<OperationLog>, Task> _operationWriter;
+        private readonly TimeSpan _shutdownTimeout;
         private int _isFlushing;
-        private bool _isDisposed;
+        private int _isDisposed;
         private volatile bool _isDbReady;
         private volatile bool _isHealthy;
         private string _healthMessage = "数据库尚未初始化";
@@ -48,10 +52,19 @@ namespace MitsubishiMonitor.Demo.Services
         public DateTime? LastSuccessfulWriteTime => _lastSuccessfulWriteTime;
 
         public LogBufferService()
+            : this(AppConfig.DatabasePath)
         {
+        }
+
+        internal LogBufferService(string databasePath, bool startTimer = true,
+            Func<List<OperationLog>, Task> operationWriter = null, TimeSpan? shutdownTimeout = null)
+        {
+            _databasePath = databasePath;
+            _operationWriter = operationWriter ?? SaveOperationBatchAsync;
+            _shutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(5);
             try
             {
-                _spool = new DurableLogSpool(AppConfig.DatabasePath);
+                _spool = new DurableLogSpool(_databasePath);
             }
             catch (Exception ex)
             {
@@ -61,7 +74,7 @@ namespace MitsubishiMonitor.Demo.Services
             _flushTimer = new System.Timers.Timer(FlushIntervalMs);
             _flushTimer.Elapsed += OnFlushTimerElapsed;
             _flushTimer.AutoReset = true;
-            _flushTimer.Start();
+            if (startTimer) _flushTimer.Start();
         }
 
         public void SetDatabaseReady()
@@ -87,15 +100,38 @@ namespace MitsubishiMonitor.Demo.Services
         public void EnqueueOperationLog(OperationLog log)
         {
             if (log == null) return;
-            _operationLogQueue.Enqueue(log);
-            SpillOverflow(_operationLogQueue, "operation");
+            lock (_queueSync)
+            {
+                if (Volatile.Read(ref _isDisposed) != 0) { PersistLateLog(log); return; }
+                _operationLogQueue.Enqueue(log);
+                SpillOverflow(_operationLogQueue, "operation");
+            }
         }
 
         public void EnqueueTemperatureLog(TemperatureLog log)
         {
             if (log == null) return;
-            _temperatureLogQueue.Enqueue(log);
-            SpillOverflow(_temperatureLogQueue, "temperature");
+            lock (_queueSync)
+            {
+                if (Volatile.Read(ref _isDisposed) != 0) { PersistLateLog(log); return; }
+                _temperatureLogQueue.Enqueue(log);
+                SpillOverflow(_temperatureLogQueue, "temperature");
+            }
+        }
+
+        private void PersistLateLog(object log)
+        {
+            var persisted = log switch
+            {
+                OperationLog operation => _spool?.TryAppend(operation) == true,
+                TemperatureLog temperature => _spool?.TryAppend(temperature) == true,
+                _ => false
+            };
+            if (persisted) return;
+            Interlocked.Increment(ref _droppedCount);
+            _isHealthy = false;
+            _healthMessage = "退出后的迟到日志无法持久化，已计入丢失记录";
+            PublishHealth();
         }
 
         private void SpillOverflow<T>(ConcurrentQueue<T> queue, string kind)
@@ -129,9 +165,11 @@ namespace MitsubishiMonitor.Demo.Services
             _ = FlushOnceAsync();
         }
 
-        public async Task<bool> FlushOnceAsync()
+        public Task<bool> FlushOnceAsync() => FlushOnceAsync(ignoreBackoff: false);
+
+        private async Task<bool> FlushOnceAsync(bool ignoreBackoff)
         {
-            if (_nextRetryUtc != default && DateTime.UtcNow < _nextRetryUtc)
+            if (!ignoreBackoff && _nextRetryUtc != default && DateTime.UtcNow < _nextRetryUtc)
                 return false;
             if (Interlocked.Exchange(ref _isFlushing, 1) == 1)
                 return false;
@@ -148,47 +186,29 @@ namespace MitsubishiMonitor.Demo.Services
 
         private async Task<bool> FlushCoreAsync()
         {
-            if (!_isDbReady)
-            {
-                _isHealthy = false;
-                if (string.IsNullOrWhiteSpace(_healthMessage))
-                    _healthMessage = "数据库未就绪";
-                PublishHealth();
-                return false;
-            }
-
-            var operationLogs = _spool?.PeekOperations(MaxBatchSize) ?? new List<OperationLog>();
-            var temperatureLogs = _spool?.PeekTemperatures(MaxBatchSize) ?? new List<TemperatureLog>();
-            var operationSpoolCount = operationLogs.Count;
-            var temperatureSpoolCount = temperatureLogs.Count;
-
-            while (operationLogs.Count < MaxBatchSize && _operationLogQueue.TryDequeue(out var operation))
-                operationLogs.Add(operation);
-            while (temperatureLogs.Count < MaxBatchSize && _temperatureLogQueue.TryDequeue(out var temperature))
-                temperatureLogs.Add(temperature);
-
-            if (operationLogs.Count == 0 && temperatureLogs.Count == 0)
-            {
-                MarkWriteHealthy("数据库正常，无待写日志");
-                return true;
-            }
-
-            var operationComplete = operationLogs.Count == 0;
-            var temperatureComplete = temperatureLogs.Count == 0;
             try
             {
+                // 写库前保存批次，Dispose 不必无限等待 SQLite 才能保住在途日志。
+                // 只有磁盘保存成功后才出内存队列；数据库成功后才确认 spool。
+                lock (_queueSync) PersistQueuedLogsLocked(MaxBatchSize);
+                if (!_isDbReady)
+                {
+                    _isHealthy = false;
+                    PublishHealth();
+                    return false;
+                }
+                var operationLogs = _spool.PeekOperations(MaxBatchSize);
+                var temperatureLogs = _spool.PeekTemperatures(MaxBatchSize);
                 if (operationLogs.Count > 0)
                 {
                     await SaveValidatedOperationBatchAsync(operationLogs).ConfigureAwait(false);
-                    _spool?.AcknowledgeOperations(operationSpoolCount);
-                    operationComplete = true;
+                    _spool.AcknowledgeOperations(operationLogs.Count);
                 }
 
                 if (temperatureLogs.Count > 0)
                 {
                     await SaveValidatedTemperatureBatchAsync(temperatureLogs).ConfigureAwait(false);
-                    _spool?.AcknowledgeTemperatures(temperatureSpoolCount);
-                    temperatureComplete = true;
+                    _spool.AcknowledgeTemperatures(temperatureLogs.Count);
                 }
 
                 MarkWriteHealthy($"写入成功：操作 {operationLogs.Count} 条，温度 {temperatureLogs.Count} 条");
@@ -196,16 +216,11 @@ namespace MitsubishiMonitor.Demo.Services
             }
             catch (Exception ex)
             {
-                if (!operationComplete)
-                    foreach (var log in operationLogs.Skip(operationSpoolCount)) _operationLogQueue.Enqueue(log);
-                if (!temperatureComplete)
-                    foreach (var log in temperatureLogs.Skip(temperatureSpoolCount)) _temperatureLogQueue.Enqueue(log);
-
                 _isHealthy = false;
                 _consecutiveWriteFailures++;
                 var retrySeconds = Math.Min(60, 3 * (1 << Math.Min(4, _consecutiveWriteFailures - 1)));
                 _nextRetryUtc = DateTime.UtcNow.AddSeconds(retrySeconds);
-                _healthMessage = $"SQLite 写入失败，数据已保留，{retrySeconds} 秒后重试：{ex.Message}";
+                _healthMessage = $"日志持久化失败，未确认记录仍保留，{retrySeconds} 秒后重试：{ex.Message}";
                 Views.MainWindow.DbgLog("LogBufferService:Flush", "SQLite 写入异常", new
                 {
                     error = ex.ToString(),
@@ -214,6 +229,24 @@ namespace MitsubishiMonitor.Demo.Services
                 }, "DB");
                 PublishHealth();
                 return false;
+            }
+        }
+
+        // 调用方持有 _queueSync，保证退出/溢出/定时器之间不会重复转移队列条目。
+        private void PersistQueuedLogsLocked(int limit)
+        {
+            _spool ??= new DurableLogSpool(_databasePath);
+            var operations = _operationLogQueue.Take(limit).ToList();
+            if (operations.Count > 0)
+            {
+                if (!_spool.TryAppendBatch(operations)) throw new IOException("操作日志磁盘缓冲写入失败");
+                for (var i = 0; i < operations.Count; i++) _operationLogQueue.TryDequeue(out _);
+            }
+            var temperatures = _temperatureLogQueue.Take(limit).ToList();
+            if (temperatures.Count > 0)
+            {
+                if (!_spool.TryAppendBatch(temperatures)) throw new IOException("温度日志磁盘缓冲写入失败");
+                for (var i = 0; i < temperatures.Count; i++) _temperatureLogQueue.TryDequeue(out _);
             }
         }
 
@@ -230,7 +263,7 @@ namespace MitsubishiMonitor.Demo.Services
             }
 
             if (valid.Count > 0)
-                await SaveOperationBatchAsync(valid).ConfigureAwait(false);
+                await _operationWriter(valid).ConfigureAwait(false);
         }
 
         private async Task SaveValidatedTemperatureBatchAsync(List<TemperatureLog> records)
@@ -249,16 +282,16 @@ namespace MitsubishiMonitor.Demo.Services
                 await SaveTemperatureBatchAsync(valid).ConfigureAwait(false);
         }
 
-        private static async Task SaveOperationBatchAsync(List<OperationLog> records)
+        private async Task SaveOperationBatchAsync(List<OperationLog> records)
         {
-            using var context = new MonitorDbContext();
+            using var context = new MonitorDbContext(_databasePath);
             context.OperationLogs.AddRange(records);
             await context.SaveChangesAsync().ConfigureAwait(false);
         }
 
-        private static async Task SaveTemperatureBatchAsync(List<TemperatureLog> records)
+        private async Task SaveTemperatureBatchAsync(List<TemperatureLog> records)
         {
-            using var context = new MonitorDbContext();
+            using var context = new MonitorDbContext(_databasePath);
             context.TemperatureLogs.AddRange(records);
             await context.SaveChangesAsync().ConfigureAwait(false);
         }
@@ -346,26 +379,21 @@ namespace MitsubishiMonitor.Demo.Services
         {
             try
             {
-                var deadline = Environment.TickCount64 + 5000;
+                var deadline = Environment.TickCount64 + (long)_shutdownTimeout.TotalMilliseconds;
                 while (!_operationLogQueue.IsEmpty || !_temperatureLogQueue.IsEmpty || SpoolCount > 0)
                 {
                     if (Environment.TickCount64 > deadline) break;
-                    if (Interlocked.Exchange(ref _isFlushing, 1) == 1)
+                    if (Volatile.Read(ref _isFlushing) == 1)
                     {
                         Thread.Sleep(50);
                         continue;
                     }
 
-                    bool success;
-                    try
-                    {
-                        success = FlushCoreAsync().GetAwaiter().GetResult();
-                    }
-                    finally
-                    {
-                        Interlocked.Exchange(ref _isFlushing, 0);
-                    }
-                    if (!success) break;
+                    // SQLite 的异步 API 也可能同步阻塞；放到后台后才能兑现退出等待预算。
+                    var flushTask = Task.Run(() => FlushOnceAsync(ignoreBackoff: true));
+                    var remaining = Math.Max(0, deadline - Environment.TickCount64);
+                    if (!flushTask.Wait(TimeSpan.FromMilliseconds(remaining)) || !flushTask.GetAwaiter().GetResult())
+                        break;
                 }
             }
             catch (Exception ex)
@@ -378,11 +406,23 @@ namespace MitsubishiMonitor.Demo.Services
 
         public void Dispose()
         {
-            if (_isDisposed) return;
-            _isDisposed = true;
+            if (Interlocked.Exchange(ref _isDisposed, 1) != 0) return;
             _flushTimer.Stop();
             _flushTimer.Dispose();
             Flush();
+            try
+            {
+                lock (_queueSync) PersistQueuedLogsLocked(int.MaxValue);
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Add(ref _droppedCount, PendingCount);
+                _isHealthy = false;
+                _healthMessage = $"退出时仍有 {PendingCount} 条日志无法持久化：{ex.Message}";
+                PublishHealth();
+                Views.MainWindow.DbgLog("LogBufferService:Shutdown", _healthMessage,
+                    new { pending = PendingCount, error = ex.ToString() }, "DB");
+            }
         }
     }
 }

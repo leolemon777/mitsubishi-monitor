@@ -113,6 +113,8 @@ namespace MitsubishiMonitor.Demo.Services
 
         /// <summary>正在执行手动/启动探测的设备 Id，防止监控节拍并发安排第二条连接链。</summary>
         private readonly ConcurrentDictionary<int, byte> _connectingIds = new();
+        private readonly ConcurrentDictionary<int, long> _connectionPolicyVersions = new();
+        private readonly object _connectionPolicySync = new();
 
         internal sealed class ReconnectState
         {
@@ -260,9 +262,11 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 try
                 {
-                    await _dataService.InitializeAsync(_lifecycleCts.Token);
-                    _lifecycleCts.Token.ThrowIfCancellationRequested();
-                    _logBuffer.SetDatabaseReady();
+                    await DatabaseStartupRecovery.RunAsync(
+                        _dataService.InitializeAsync,
+                        _logBuffer.SetDatabaseReady,
+                        ex => _logBuffer.SetDatabaseUnavailable($"数据库初始化失败，将自动重试：{ex.Message}"),
+                        _lifecycleCts.Token);
                     System.Diagnostics.Debug.WriteLine("[DeviceManager] DB 初始化完成，LogBuffer 写入已启用");
                 }
                 catch (OperationCanceledException) when (_lifecycleCts.IsCancellationRequested)
@@ -341,6 +345,26 @@ namespace MitsubishiMonitor.Demo.Services
                 }
             });
         }
+
+        // 隔离测试使用显式假服务，不创建数据库、定时器、串口或真实 PLC transport。
+        internal DeviceManagerService(IReadOnlyCollection<DevicePlcWrapper> wrappers)
+        {
+            IsDemoVideoMode = true;
+            _wrappers = new ObservableCollection<DevicePlcWrapper>(wrappers);
+            _devices = new ObservableCollection<Device>(wrappers.Select(wrapper => wrapper.Device));
+            Devices = new ReadOnlyObservableCollection<Device>(_devices);
+            foreach (var wrapper in wrappers) _deviceMap[wrapper.Device.Id] = wrapper.Device;
+        }
+
+        private long GetConnectionPolicyVersion(int deviceId)
+            => _connectionPolicyVersions.GetOrAdd(deviceId, 0);
+
+        private void InvalidateConnectionRequests(int deviceId)
+            => _connectionPolicyVersions.AddOrUpdate(deviceId, 1, (_, version) => version + 1);
+
+        private bool IsConnectionRequestAllowed(DevicePlcWrapper wrapper, long? policyVersion = null)
+            => !_stopped && DeviceMonitoringPolicy.IsConnectionAuthorized(wrapper.Device.MonitoringMode) &&
+               (!policyVersion.HasValue || GetConnectionPolicyVersion(wrapper.Device.Id) == policyVersion.Value);
 
         private void OnCleanupTimerElapsed(object sender, ElapsedEventArgs e)
         {
@@ -905,10 +929,11 @@ namespace MitsubishiMonitor.Demo.Services
         private bool TryStartAcquisitionIfStillAuthorized(
             DevicePlcWrapper wrapper,
             int deviceId,
-            string source)
+            string source,
+            long? policyVersion = null)
         {
             bool IsAuthorizedAndConnected()
-                => !_stopped &&
+                => IsConnectionRequestAllowed(wrapper, policyVersion) &&
                    _autoReconnectIds.ContainsKey(deviceId) &&
                    wrapper.PlcService.CurrentStatus.IsConnected;
 
@@ -1591,22 +1616,31 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 if (!IsDemoVideoMode)
                     AppConfig.SaveDeviceMonitoringMode(deviceId - 1, DeviceMonitoringMode.AutoStandby);
-                wrapper.Device.MonitoringMode = DeviceMonitoringMode.AutoStandby;
+                lock (_connectionPolicySync)
+                {
+                    InvalidateConnectionRequests(deviceId);
+                    wrapper.Device.MonitoringMode = DeviceMonitoringMode.AutoStandby;
+                }
             }
 
+            long policyVersion;
+            lock (_connectionPolicySync)
+            {
+                if (!IsConnectionRequestAllowed(wrapper)) return false;
+                policyVersion = GetConnectionPolicyVersion(deviceId);
+                if (!_connectingIds.TryAdd(deviceId, 0))
+                    return wrapper.PlcService.CurrentStatus.IsConnected;
+                _autoReconnectIds.TryAdd(deviceId, 0);
+            }
             CancelScheduledReconnect(deviceId);
-            if (!_connectingIds.TryAdd(deviceId, 0))
-                return wrapper.PlcService.CurrentStatus.IsConnected;
             SetDeviceConnectionActivity(wrapper.Device, connecting: true, reconnecting: false, communicationFault: false);
-
-            _autoReconnectIds.TryAdd(deviceId, 0);
 
             var success = false;
             try
             {
                 success = await wrapper.PlcService.ConnectAsync();
                 if (success)
-                    success = TryStartAcquisitionIfStillAuthorized(wrapper, deviceId, "手动连接");
+                    success = TryStartAcquisitionIfStillAuthorized(wrapper, deviceId, "手动连接", policyVersion);
                 return success;
             }
             finally
@@ -1629,9 +1663,13 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 if (!IsDemoVideoMode)
                     AppConfig.SaveDeviceMonitoringMode(deviceId - 1, DeviceMonitoringMode.Disabled);
-                wrapper.Device.MonitoringMode = DeviceMonitoringMode.Disabled;
-                _autoReconnectIds.TryRemove(deviceId, out _);
-                _connectingIds.TryRemove(deviceId, out _);
+                lock (_connectionPolicySync)
+                {
+                    InvalidateConnectionRequests(deviceId);
+                    wrapper.Device.MonitoringMode = DeviceMonitoringMode.Disabled;
+                    _autoReconnectIds.TryRemove(deviceId, out _);
+                    _connectingIds.TryRemove(deviceId, out _);
+                }
                 CancelScheduledReconnect(deviceId);
                 SetDeviceConnectionActivity(wrapper.Device, connecting: false, reconnecting: false, communicationFault: false);
                 wrapper.PlcService.StopAcquisition();
@@ -1658,6 +1696,8 @@ namespace MitsubishiMonitor.Demo.Services
                 .Where(wrapper => DeviceMonitoringPolicy.IsConnectionAuthorized(
                     wrapper.Device.MonitoringMode))
                 .ToList();
+            var policyVersions = wrapperList.ToDictionary(wrapper => wrapper.Device.Id,
+                wrapper => GetConnectionPolicyVersion(wrapper.Device.Id));
             var totalSw = System.Diagnostics.Stopwatch.StartNew();
             Views.MainWindow.DbgLog("DeviceManagerService:ConnectAll", "开始顺序连接全部 PLC", new
             {
@@ -1668,7 +1708,8 @@ namespace MitsubishiMonitor.Demo.Services
             // 按顺序连接 + 每台采集定时器错峰，避免开机就并发打满 PLC/TCP/线程池。
             for (int i = 0; i < wrapperList.Count; i++)
             {
-                await ConnectOneAsync(wrapperList[i], i, failedReasons, failedReasonsLock);
+                await ConnectOneAsync(wrapperList[i], i, failedReasons, failedReasonsLock,
+                    policyVersions[wrapperList[i].Device.Id]);
 
                 if (i < wrapperList.Count - 1)
                     await Task.Delay(300);
@@ -1688,14 +1729,18 @@ namespace MitsubishiMonitor.Demo.Services
 
         private async Task ConnectOneAsync(
             DevicePlcWrapper wrapper, int orderIndex,
-            List<string> failedReasons, object failedReasonsLock)
+            List<string> failedReasons, object failedReasonsLock, long policyVersion)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
+                lock (_connectionPolicySync)
+                {
+                    if (!IsConnectionRequestAllowed(wrapper, policyVersion)) return;
+                    if (!_connectingIds.TryAdd(wrapper.Device.Id, 0)) return;
+                    _autoReconnectIds.TryAdd(wrapper.Device.Id, 0);
+                }
                 CancelScheduledReconnect(wrapper.Device.Id);
-                if (!_connectingIds.TryAdd(wrapper.Device.Id, 0))
-                    return;
                 SetDeviceConnectionActivity(wrapper.Device, connecting: true, reconnecting: false, communicationFault: false);
                 Views.MainWindow.DbgLog("DeviceManagerService:ConnectOne", "开始连接 PLC", new
                 {
@@ -1703,8 +1748,6 @@ namespace MitsubishiMonitor.Demo.Services
                     wrapper.Device.IpAddress,
                     orderIndex
                 }, "CONNECT");
-
-                _autoReconnectIds.TryAdd(wrapper.Device.Id, 0);
 
                 var success = await wrapper.PlcService.ConnectAsync();
                 if (success)
@@ -1717,7 +1760,8 @@ namespace MitsubishiMonitor.Demo.Services
                     success = TryStartAcquisitionIfStillAuthorized(
                         wrapper,
                         wrapper.Device.Id,
-                        "批量连接");
+                        "批量连接",
+                        policyVersion);
                 }
 
                 if (success)
@@ -1792,7 +1836,16 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 var device = wrapper.Device;
                 var mode = modes[device.Id - 1];
-                device.MonitoringMode = mode;
+                lock (_connectionPolicySync)
+                {
+                    if (device.MonitoringMode != mode)
+                        InvalidateConnectionRequests(device.Id);
+                    device.MonitoringMode = mode;
+                    if (!DeviceMonitoringPolicy.IsConnectionAuthorized(mode))
+                        _autoReconnectIds.TryRemove(device.Id, out _);
+                    else
+                        _autoReconnectIds.TryAdd(device.Id, 0);
+                }
                 CancelScheduledReconnect(device.Id);
 
                 if (!DeviceMonitoringPolicy.IsConnectionAuthorized(mode))
@@ -1833,7 +1886,11 @@ namespace MitsubishiMonitor.Demo.Services
         public void DisconnectAllDevices()
         {
             // 程序退出/批量断开时，清空自动重连白名单，避免后台 Task 继续重连
-            _autoReconnectIds.Clear();
+            lock (_connectionPolicySync)
+            {
+                foreach (var wrapper in _wrappers) InvalidateConnectionRequests(wrapper.Device.Id);
+                _autoReconnectIds.Clear();
+            }
             foreach (var state in _reconnectStates.Values)
             {
                 lock (state)

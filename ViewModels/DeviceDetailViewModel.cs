@@ -28,20 +28,21 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private readonly IPlcService _plcService;
         private readonly DispatcherTimer _plcUpdateTimer;
         private bool _isDisposed = false;
-        private readonly ObservableCollection<float> _phaseAValues = new();
-        private readonly ObservableCollection<float> _phaseBValues = new();
-        private readonly ObservableCollection<float> _phaseCValues = new();
-        private readonly ObservableCollection<float> _temperatureValuesForVoltageChart = new();
+        private readonly TemperatureChartWindow _chart = new();
+        private ObservableCollection<double?> _phaseAValues => _chart.PhaseA;
+        private ObservableCollection<double?> _phaseBValues => _chart.PhaseB;
+        private ObservableCollection<double?> _phaseCValues => _chart.PhaseC;
+        private ObservableCollection<double?> _temperatureValuesForVoltageChart => _chart.Temperatures;
 
         private readonly Queue<float> _diagnosisTempHistory = new();
         private readonly Queue<float> _diagnosisVoltageHistory = new();
         private readonly Queue<DateTime> _diagnosisSampleTimes = new();
         // 温度真实采样默认每 10 秒一次，保留 60 个点约等于最近 10 分钟。
-        private const int VoltageHistoryLimit = 60;
         // 6 个真实温度样本约覆盖 50–60 秒，不再用 1 秒 UI Tick 重复填充相同值。
         private const int DiagnosisWindowSamples = 6;
         private const int PredictionHorizonMinutes = 10;
         private DateTime _lastChartSampleTime;
+        private long _diagnosisGeneration;
         private int _pendingOperationDelta;
         private int _loadVersion;
         private CancellationTokenSource _loadCts;
@@ -165,24 +166,29 @@ namespace MitsubishiMonitor.Demo.ViewModels
         /// <summary>
         /// 温度数据（直接绑定到图表）
         /// </summary>
-        public ObservableCollection<float> TemperatureValues => _temperatureValuesForVoltageChart;
+        public ObservableCollection<double?> TemperatureValues => _temperatureValuesForVoltageChart;
 
         /// <summary>
         /// A相电压数据
         /// </summary>
-        public ObservableCollection<float> PhaseAValues => _phaseAValues;
+        public ObservableCollection<double?> PhaseAValues => _phaseAValues;
 
         /// <summary>
         /// B相电压数据
         /// </summary>
-        public ObservableCollection<float> PhaseBValues => _phaseBValues;
+        public ObservableCollection<double?> PhaseBValues => _phaseBValues;
 
         /// <summary>
         /// C相电压数据
         /// </summary>
-        public ObservableCollection<float> PhaseCValues => _phaseCValues;
+        public ObservableCollection<double?> PhaseCValues => _phaseCValues;
 
         public DeviceDetailViewModel(Device device, DeviceManagerService deviceManager)
+            : this(device, deviceManager, loadHistory: true, startTimer: true)
+        {
+        }
+
+        internal DeviceDetailViewModel(Device device, DeviceManagerService deviceManager, bool loadHistory, bool startTimer)
         {
             _currentDevice = device;
             _deviceManager = deviceManager;
@@ -213,8 +219,6 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 Interval = TimeSpan.FromSeconds(1)
             };
             _plcUpdateTimer.Tick += (s, e) => UpdatePhaseVoltages();
-            _plcUpdateTimer.Start();
-            UpdatePhaseVoltages();
 
             // 初始化寄存器显示（先用 0 值占位，连接后实时更新）
             if (HasCRegisters)
@@ -256,15 +260,17 @@ namespace MitsubishiMonitor.Demo.ViewModels
             // 先显示当前状态。现场模式继续从数据库加载真实历史；
             // 视频演示模式只使用本次启动的内存数据，避免历史演示记录污染计数。
             InitializeDisplayData();
-            if (!App.IsDemoVideoMode)
+            if (loadHistory && !App.IsDemoVideoMode)
                 _ = LoadDataAsync();
+            if (startTimer) _plcUpdateTimer.Start();
+            UpdatePhaseVoltages();
         }
 
         private void InitializeCharts()
         {
             var series = new List<ISeries>
             {
-                new LineSeries<float>
+                new LineSeries<double?>
                 {
                     Name = "温度 (°C)",
                     Values = _temperatureValuesForVoltageChart,
@@ -278,7 +284,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
             // 仅在有电压数据时添加电压曲线
             if (HasVoltage)
             {
-                series.Add(new LineSeries<float>
+                series.Add(new LineSeries<double?>
                 {
                     Name = "A相电压",
                     Values = _phaseAValues,
@@ -287,7 +293,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     Fill = null,
                     ScalesYAt = 1
                 });
-                series.Add(new LineSeries<float>
+                series.Add(new LineSeries<double?>
                 {
                     Name = "B相电压",
                     Values = _phaseBValues,
@@ -296,7 +302,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     Fill = null,
                     ScalesYAt = 1
                 });
-                series.Add(new LineSeries<float>
+                series.Add(new LineSeries<double?>
                 {
                     Name = "C相电压",
                     Values = _phaseCValues,
@@ -388,6 +394,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
         private async Task ChangeTimeRangeAsync(string range)
         {
             SelectedTimeRange = range;
+            _chart.FollowLive = range == "今日";
             var now = DateTime.Now;
 
             switch (range)
@@ -418,6 +425,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
         [RelayCommand]
         private async Task RefreshAsync()
         {
+            if (_chart.FollowLive) FilterEndDate = DateTime.Now;
             await LoadDataAsync();
         }
 
@@ -592,9 +600,6 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 if (_isDisposed || loadVersion != Volatile.Read(ref _loadVersion))
                     return;
 
-                var tempValues = tempLogs.Select(log => log.Temperature).ToList();
-                var labels = tempLogs.Select(log => log.RecordTime.ToString("HH:mm")).ToArray();
-
                 await Application.Current.Dispatcher.InvokeAsync(() =>
                 {
                     if (_isDisposed || loadVersion != Volatile.Read(ref _loadVersion))
@@ -606,12 +611,10 @@ namespace MitsubishiMonitor.Demo.ViewModels
                     MaxTemperature = statistics.Count == 0 ? 0 : statistics.Maximum;
                     MinTemperature = statistics.Count == 0 ? 0 : statistics.Minimum;
 
-                    _temperatureValuesForVoltageChart.Clear();
-                    foreach (var value in tempValues)
-                        _temperatureValuesForVoltageChart.Add(value);
-                    TimeLabels = labels;
+                    _chart.ReplaceHistory(tempLogs, endTime);
+                    TimeLabels = _chart.Labels;
                     System.Diagnostics.Debug.WriteLine(
-                        $"[DeviceDetailViewModel] 历史统计 {statistics.Count} 条，图表 {tempValues.Count} 条");
+                        $"[DeviceDetailViewModel] 历史统计 {statistics.Count} 条，图表 {_chart.Temperatures.Count} 条");
                 }, DispatcherPriority.Background);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -624,7 +627,7 @@ namespace MitsubishiMonitor.Demo.ViewModels
             }
         }
 
-        private void UpdatePhaseVoltages()
+        internal void UpdatePhaseVoltages()
         {
             try
             {
@@ -639,8 +642,11 @@ namespace MitsubishiMonitor.Demo.ViewModels
                 TotalOperationCount += opDelta;
 
             // 目标温度显示
-            TargetTemperatureDisplay = status.LastAuxiliarySampleTime != default &&
-                                       float.IsFinite(status.TargetTemperature)
+            var hasFreshAuxiliary = AuxiliaryTelemetry.IsFresh(status, PlcConfig.TemperatureInterval, DateTime.Now);
+            var hasFreshPrimary = status.IsConnected && status.LastTemperatureSampleTime != default &&
+                status.TemperatureQuality == TemperatureSampleQuality.Valid &&
+                !(_plcService is MitsubishiPlcService service && service.IsTemperatureSampleDelayed(out _));
+            TargetTemperatureDisplay = hasFreshAuxiliary
                 ? $"{status.TargetTemperature:F1}°C"
                 : "--.-°C";
 
@@ -648,14 +654,24 @@ namespace MitsubishiMonitor.Demo.ViewModels
             if (!status.IsAlarm)
                 IsAlarmAcknowledged = false;
             IsAlarm = status.IsAlarm;
-            IsSsrFault = status.IsSsrFault;
+            IsSsrFault = hasFreshAuxiliary && status.IsSsrFault;
 
             // 电压文本（轻量 string 更新，不触发图表）
             if (HasVoltage)
             {
-                PhaseAVoltage = $"{status.ThermocoupleA:F3} V";
-                PhaseBVoltage = $"{status.ThermocoupleB:F3} V";
-                PhaseCVoltage = $"{status.ThermocoupleC:F3} V";
+                PhaseAVoltage = hasFreshAuxiliary ? $"{status.ThermocoupleA:F3} V" : "--.- V";
+                PhaseBVoltage = hasFreshAuxiliary ? $"{status.ThermocoupleB:F3} V" : "--.- V";
+                PhaseCVoltage = hasFreshAuxiliary ? $"{status.ThermocoupleC:F3} V" : "--.- V";
+                if (!hasFreshAuxiliary || !hasFreshPrimary ||
+                    _diagnosisGeneration != status.LastTemperatureConnectionGeneration)
+                {
+                    _diagnosisGeneration = status.LastTemperatureConnectionGeneration;
+                    _diagnosisTempHistory.Clear();
+                    _diagnosisVoltageHistory.Clear();
+                    _diagnosisSampleTimes.Clear();
+                    HeatingDiagnosis = "加热诊断：数据缺失或过期，等待有效采样。";
+                    PredictedTemperatureDisplay = "--.- °C";
+                }
             }
 
             // 更新 C 寄存器显示（原地更新，不重建集合）
@@ -679,20 +695,20 @@ namespace MitsubishiMonitor.Demo.ViewModels
             var currentTemp = status.Temperature;
 
             // 温度曲线写入
-            _temperatureValuesForVoltageChart.Add(currentTemp);
-            if (_temperatureValuesForVoltageChart.Count > VoltageHistoryLimit)
-                _temperatureValuesForVoltageChart.RemoveAt(0);
+            var sampleHasAuxiliary = AuxiliaryTelemetry.IsFresh(status, PlcConfig.TemperatureInterval, sampleTime);
+            _chart.AppendLive(new TemperatureLog
+            {
+                RecordTime = sampleTime, Temperature = currentTemp, TargetTemperature = status.TargetTemperature,
+                ThermocoupleA = status.ThermocoupleA, ThermocoupleB = status.ThermocoupleB, ThermocoupleC = status.ThermocoupleC,
+                AuxiliarySampleTime = status.LastAuxiliarySampleTime == default ? null : status.LastAuxiliarySampleTime,
+                HasFreshAuxiliaryData = sampleHasAuxiliary
+            });
+            TimeLabels = _chart.Labels;
 
             // 电压曲线写入 + 诊断计算
             if (HasVoltage)
             {
-                _phaseAValues.Add(status.ThermocoupleA);
-                _phaseBValues.Add(status.ThermocoupleB);
-                _phaseCValues.Add(status.ThermocoupleC);
-
-                if (_phaseAValues.Count > VoltageHistoryLimit) _phaseAValues.RemoveAt(0);
-                if (_phaseBValues.Count > VoltageHistoryLimit) _phaseBValues.RemoveAt(0);
-                if (_phaseCValues.Count > VoltageHistoryLimit) _phaseCValues.RemoveAt(0);
+                if (!hasFreshPrimary || !hasFreshAuxiliary || !sampleHasAuxiliary) return;
 
                 // 加热效率诊断
                 var avgVoltageNow = (status.ThermocoupleA + status.ThermocoupleB + status.ThermocoupleC) / 3f;

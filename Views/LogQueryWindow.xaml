@@ -533,11 +533,14 @@
                                 <DataGridTextColumn Header="时间" Binding="{Binding RecordTime, StringFormat=yyyy-MM-dd HH:mm:ss}" Width="158"/>
                                 <DataGridTextColumn Header="设备" Binding="{Binding DeviceName}" Width="130"/>
                                 <DataGridTextColumn Header="温度(°C)" Binding="{Binding Temperature, StringFormat=F1}" Width="88"/>
-                                <DataGridTextColumn Header="A相电压" Binding="{Binding ThermocoupleA, StringFormat=F3}" Width="88"/>
-                                <DataGridTextColumn Header="B相电压" Binding="{Binding ThermocoupleB, StringFormat=F3}" Width="88"/>
-                                <DataGridTextColumn Header="C相电压" Binding="{Binding ThermocoupleC, StringFormat=F3}" Width="88"/>
+                                <DataGridTextColumn Header="A相电压" Binding="{Binding ThermocoupleADisplay, Mode=OneWay}" Width="88"/>
+                                <DataGridTextColumn Header="B相电压" Binding="{Binding ThermocoupleBDisplay, Mode=OneWay}" Width="88"/>
+                                <DataGridTextColumn Header="C相电压" Binding="{Binding ThermocoupleCDisplay, Mode=OneWay}" Width="88"/>
                                 <DataGridTextColumn Header="是否异常" Binding="{Binding IsAbnormal}" Width="80"/>
-                                <DataGridTextColumn Header="阈值/目标" Binding="{Binding Threshold, StringFormat=F1}" MinWidth="100" Width="*"/>
+                                <DataGridTextColumn Header="报警阈值" Binding="{Binding AlarmThreshold, StringFormat=F1}" Width="88"/>
+                                <DataGridTextColumn Header="目标温度" Binding="{Binding TargetTemperatureDisplay, Mode=OneWay}" Width="88"/>
+                                <DataGridTextColumn Header="辅助采样时间" Binding="{Binding AuxiliarySampleTimeDisplay, Mode=OneWay}" Width="160"/>
+                                <DataGridTextColumn Header="辅助质量" Binding="{Binding AuxiliaryQualityDisplay, Mode=OneWay}" Width="100"/>
                             </DataGrid.Columns>
                         </DataGrid>
 

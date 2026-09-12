@@ -208,7 +208,8 @@ namespace MitsubishiMonitor.Demo.Services
             {
                 foreach (var group in logs.GroupBy(l => l.RecordTime.Date))
                 {
-                    var filePath = GetDailyFilePath(exportPath, "温度记录", group.Key);
+                    // 新格式另起文件，避免向既有七列表头追加十一列记录。
+                    var filePath = GetDailyFilePath(exportPath, "温度记录_含采样质量", group.Key);
                     bool isNew = !File.Exists(filePath);
 
                     using var sw = new StreamWriter(filePath, append: true, encoding: new UTF8Encoding(true));
@@ -223,7 +224,7 @@ namespace MitsubishiMonitor.Demo.Services
                         sw.WriteLine("<h1>温度记录 — " + group.Key.ToString("yyyy-MM-dd") + "</h1>");
                         sw.WriteLine("<p class=\"tip\">此文件每 10 秒自动追加一次，用浏览器打开即可查看。</p>");
                         sw.WriteLine("<table><thead><tr>");
-                        sw.WriteLine("<th>时间</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th>");
+                        sw.WriteLine("<th>时间</th><th>设备名</th><th>温度(℃)</th><th>热电偶A(V)</th><th>热电偶B(V)</th><th>热电偶C(V)</th><th>是否异常</th><th>报警阈值(℃)</th><th>目标温度(℃)</th><th>辅助采样时间</th><th>辅助质量</th>");
                         sw.WriteLine("</tr></thead>");
                     }
 
@@ -234,10 +235,12 @@ namespace MitsubishiMonitor.Demo.Services
                             $"<td>{H(log.RecordTime.ToString("HH:mm:ss"))}</td>" +
                             $"<td>{H(log.DeviceName)}</td>" +
                             $"<td{abnClass}>{log.Temperature:F1}</td>" +
-                            $"<td>{log.ThermocoupleA:F3}</td>" +
-                            $"<td>{log.ThermocoupleB:F3}</td>" +
-                            $"<td>{log.ThermocoupleC:F3}</td>" +
+                            $"<td>{H(log.ThermocoupleADisplay)}</td>" +
+                            $"<td>{H(log.ThermocoupleBDisplay)}</td>" +
+                            $"<td>{H(log.ThermocoupleCDisplay)}</td>" +
                             $"<td>{(log.IsAbnormal ? "⚠ 异常" : "正常")}</td>" +
+                            $"<td>{log.AlarmThreshold:F1}</td><td>{H(log.TargetTemperatureDisplay)}</td>" +
+                            $"<td>{H(log.AuxiliarySampleTimeDisplay)}</td><td>{H(log.AuxiliaryQualityDisplay)}</td>" +
                             "</tr>");
                     }
                 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using HslCommunication;
@@ -13,6 +14,43 @@ namespace MitsubishiMonitor.Demo.Tests
 {
     public class MitsubishiPlcServiceRecoveryTests
     {
+        [Theory]
+        [InlineData(80f, 100f, true)]
+        [InlineData(100f, 80f, false)]
+        public async Task AuxiliaryCompletion_DoesNotOverwriteLatestTemperatureAlarm(float previous, float latest, bool expectedAlarm)
+        {
+            var transport = new FakeTransport();
+            using var service = CreateService(new QueueTransportFactory(transport), 5000);
+            service.Config.TemperatureThreshold = 90;
+            service.Config.TargetTemperatureDefinition = new TemperatureRegisterDefinition
+            {
+                Address = "D20", DataType = PlcRegisterDataType.Int16, Divisor = 10
+            };
+            Assert.True(await service.ConnectAsync());
+            const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
+            var type = typeof(MitsubishiPlcService);
+            var generation = service.ConnectionSnapshot.Generation;
+            type.GetField("_isAcquiring", flags).SetValue(service, true);
+            type.GetField("_activeAcquisitionToken", flags).SetValue(service, 1L);
+            type.GetField("_acquisitionConnectionGeneration", flags).SetValue(service, generation);
+            var commit = type.GetMethod("CommitPrimaryTemperatureSample", flags);
+            var definition = service.Config.ResolveActualTemperatureDefinition();
+            commit.Invoke(service, new object[] { generation, 1L, previous, (long)(previous * 10), definition });
+            transport.BlockAuxiliaryRead();
+            var auxiliary = (Task)type.GetMethod("TryUpdateAuxiliaryTelemetryAsync", flags)
+                .Invoke(service, new object[] { generation, 1L, previous });
+            try
+            {
+                Assert.True(await WaitUntilAsync(() => transport.AuxiliaryReadStarted.IsSet, TimeSpan.FromSeconds(2)));
+                commit.Invoke(service, new object[] { generation, 1L, latest, (long)(latest * 10), definition });
+                Assert.Equal(expectedAlarm, service.CurrentStatus.IsAlarm);
+            }
+            finally { transport.ReleaseAuxiliaryRead(); }
+            await auxiliary.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(latest, service.CurrentStatus.Temperature);
+            Assert.Equal(expectedAlarm, service.CurrentStatus.IsAlarm);
+        }
+
         [Fact]
         public async Task StaleWatchdog_DoesNotWaitForBlockedOldRead_WhenReconnecting()
         {
@@ -581,6 +619,8 @@ namespace MitsubishiMonitor.Demo.Tests
             private readonly ManualResetEventSlim _temperatureGate = new(initialState: true);
             private readonly ManualResetEventSlim _closeGate = new(initialState: true);
             private readonly ManualResetEventSlim _abortGate = new(initialState: true);
+            private readonly ManualResetEventSlim _auxiliaryGate = new(initialState: true);
+            public ManualResetEventSlim AuxiliaryReadStarted { get; } = new(false);
 
             public ManualResetEventSlim ConnectStarted { get; } = new(false);
             public ManualResetEventSlim TemperatureReadStarted { get; } = new(false);
@@ -609,6 +649,8 @@ namespace MitsubishiMonitor.Demo.Tests
             public void ReleaseClose() => _closeGate.Set();
             public void BlockAbort() => _abortGate.Reset();
             public void ReleaseAbort() => _abortGate.Set();
+            public void BlockAuxiliaryRead() => _auxiliaryGate.Reset();
+            public void ReleaseAuxiliaryRead() => _auxiliaryGate.Set();
 
             public OperateResult ConnectServer()
             {
@@ -649,6 +691,11 @@ namespace MitsubishiMonitor.Demo.Tests
             public OperateResult<short[]> ReadInt16(string address, ushort length)
             {
                 Interlocked.Increment(ref TotalReadCount);
+                if (address == "D20")
+                {
+                    AuxiliaryReadStarted.Set();
+                    _auxiliaryGate.Wait();
+                }
                 if (string.Equals(address, "D10", StringComparison.OrdinalIgnoreCase))
                 {
                     Interlocked.Increment(ref TemperatureReadCount);

@@ -16,6 +16,7 @@ namespace MitsubishiMonitor.Demo.Services
     public sealed class TowerLightService : IDisposable
     {
         private readonly SerialPort _serialPort;
+        private readonly Func<byte[], Task<bool>> _sendOverride;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private readonly object _stateQueueSync = new();
         private readonly SemaphoreSlim _stateQueueSignal = new(0, 1);
@@ -40,10 +41,10 @@ namespace MitsubishiMonitor.Demo.Services
             ["BuzzerFlash"] = FromHex("01 05 00 09 FF 00 5C 38"),
         };
 
-        public bool IsConnected => _serialPort?.IsOpen == true;
+        public bool IsConnected => _sendOverride != null || _serialPort?.IsOpen == true;
         public string PortName => _serialPort?.PortName ?? "";
         public string LastError { get; private set; } = "";
-        public string AppliedState => _appliedState;
+        public string AppliedState => Volatile.Read(ref _appliedState);
         public bool HasQueuedState
         {
             get
@@ -61,6 +62,12 @@ namespace MitsubishiMonitor.Demo.Services
                 ReadTimeout = 500,
                 WriteTimeout = 1000
             };
+        }
+
+        // 用于无硬件回归验证，生产构造仍使用 SerialPort。
+        internal TowerLightService(Func<byte[], Task<bool>> send)
+        {
+            _sendOverride = send ?? throw new ArgumentNullException(nameof(send));
         }
 
         public static string[] GetAvailablePortNames()
@@ -207,6 +214,7 @@ namespace MitsubishiMonitor.Demo.Services
 
         public bool TryConnect()
         {
+            if (_sendOverride != null) return true;
             try
             {
                 if (!_serialPort.IsOpen)
@@ -236,8 +244,10 @@ namespace MitsubishiMonitor.Demo.Services
             await _sendLock.WaitAsync().ConfigureAwait(false);
             try
             {
-                return await Task.Run(() => SendCore(command), CancellationToken.None)
-                    .ConfigureAwait(false);
+                // 单条测试命令改变真实状态，旧的完整状态缓存立即失效。
+                // 与整个正常灯态的下发共用同一锁，不能在完整状态提交后再写回旧缓存。
+                Volatile.Write(ref _appliedState, "");
+                return await SendCommandCoreAsync(command).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -250,6 +260,11 @@ namespace MitsubishiMonitor.Demo.Services
                 _sendLock.Release();
             }
         }
+
+        private Task<bool> SendCommandCoreAsync(byte[] command)
+            => _sendOverride != null
+                ? _sendOverride(command)
+                : Task.Run(() => SendCore(command), CancellationToken.None);
 
         private bool SendCore(byte[] command)
         {
@@ -317,14 +332,12 @@ namespace MitsubishiMonitor.Demo.Services
                         _stateSignalPending = false;
                     }
 
-                    if (string.IsNullOrEmpty(desired) ||
-                        string.Equals(desired, _appliedState, StringComparison.Ordinal))
+                    if (string.IsNullOrEmpty(desired))
                         continue;
 
                     var ok = await SendDesiredStateAsync(desired).ConfigureAwait(false);
                     if (ok)
                     {
-                        _appliedState = desired;
                         continue;
                     }
 
@@ -355,23 +368,33 @@ namespace MitsubishiMonitor.Demo.Services
 
         private async Task<bool> SendDesiredStateAsync(string desiredState)
         {
-            switch (desiredState)
+            await _sendLock.WaitAsync().ConfigureAwait(false);
+            try
             {
-                case nameof(TowerLightDecision.RedBuzzerOn):
-                    return await SendAsync("Red").ConfigureAwait(false) &
-                           await SendAsync("BuzzerOn").ConfigureAwait(false);
-                case nameof(TowerLightDecision.RedBuzzerOff):
-                    return await SendAsync("Red").ConfigureAwait(false) &
-                           await SendAsync("BuzzerOff").ConfigureAwait(false);
-                case nameof(TowerLightDecision.Green):
-                    return await SendAsync("Green").ConfigureAwait(false) &
-                           await SendAsync("BuzzerOff").ConfigureAwait(false);
-                case nameof(TowerLightDecision.Yellow):
-                    return await SendAsync("Yellow").ConfigureAwait(false) &
-                           await SendAsync("BuzzerOff").ConfigureAwait(false);
-                default:
-                    return await SendAsync("Off").ConfigureAwait(false);
+                if (string.Equals(desiredState, _appliedState, StringComparison.Ordinal))
+                    return true;
+                Volatile.Write(ref _appliedState, "");
+                var commands = desiredState switch
+                {
+                    nameof(TowerLightDecision.RedBuzzerOn) => new[] { "Red", "BuzzerOn" },
+                    nameof(TowerLightDecision.RedBuzzerOff) => new[] { "Red", "BuzzerOff" },
+                    nameof(TowerLightDecision.Green) => new[] { "Green", "BuzzerOff" },
+                    nameof(TowerLightDecision.Yellow) => new[] { "Yellow", "BuzzerOff" },
+                    _ => new[] { "Off" }
+                };
+                var ok = true;
+                foreach (var command in commands)
+                    ok &= await SendCommandCoreAsync(Commands[command]).ConfigureAwait(false);
+                if (ok)
+                    Volatile.Write(ref _appliedState, desiredState);
+                return ok;
             }
+            catch (Exception ex)
+            {
+                LastError = "三色灯发送失败: " + ex.Message;
+                return false;
+            }
+            finally { _sendLock.Release(); }
         }
 
         // 同步版 Send：内部阻塞等待 SendAsync，禁止在 UI 线程调用。

@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text;
+using System.Text.Json.Serialization;
 using MitsubishiMonitor.Demo.Models;
 
 namespace MitsubishiMonitor.Demo.Services
 {
     /// <summary>
-    /// SQLite 长时间不可写时的本地持久化缓冲。只在内存队列溢出时写入，
-    /// 恢复后优先回放，避免以静默丢日志换取进程存活。
+    /// 日志批次在提交 SQLite 前持久化，成功后确认删除；退出时也保存待写队列。
     /// </summary>
     internal sealed class DurableLogSpool
     {
@@ -17,7 +18,11 @@ namespace MitsubishiMonitor.Demo.Services
         private readonly string _operationPath;
         private readonly string _temperaturePath;
         private readonly string _deadLetterPath;
-        private readonly JsonSerializerOptions _jsonOptions = new();
+        private readonly JsonSerializerOptions _jsonOptions = new()
+        {
+            // 无效数值仍必须能持久化，随后由 LogBuffer 的语义校验隔离到 dead-letter。
+            NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+        };
         private long _pendingCount;
 
         public DurableLogSpool(string databasePath)
@@ -38,6 +43,8 @@ namespace MitsubishiMonitor.Demo.Services
 
         public bool TryAppend(OperationLog log) => TryAppend(_operationPath, log);
         public bool TryAppend(TemperatureLog log) => TryAppend(_temperaturePath, log);
+        public bool TryAppendBatch(IReadOnlyList<OperationLog> logs) => TryAppendBatch(_operationPath, logs);
+        public bool TryAppendBatch(IReadOnlyList<TemperatureLog> logs) => TryAppendBatch(_temperaturePath, logs);
 
         public List<OperationLog> PeekOperations(int maxCount)
             => Peek<OperationLog>(_operationPath, maxCount);
@@ -68,14 +75,34 @@ namespace MitsubishiMonitor.Demo.Services
         }
 
         private bool TryAppend<T>(string path, T value)
+            => TryAppendBatch(path, new[] { value });
+
+        private bool TryAppendBatch<T>(string path, IReadOnlyList<T> values)
         {
             try
             {
                 lock (_sync)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(path));
-                    File.AppendAllText(path, JsonSerializer.Serialize(value, _jsonOptions) + Environment.NewLine);
-                    _pendingCount++;
+                    using var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+                    var originalLength = stream.Length;
+                    stream.Position = originalLength;
+                    try
+                    {
+                        using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true))
+                        {
+                            foreach (var value in values)
+                                writer.WriteLine(JsonSerializer.Serialize(value, _jsonOptions));
+                            writer.Flush();
+                            stream.Flush(flushToDisk: true);
+                        }
+                        _pendingCount += values.Count;
+                    }
+                    catch
+                    {
+                        stream.SetLength(originalLength);
+                        throw;
+                    }
                 }
                 return true;
             }

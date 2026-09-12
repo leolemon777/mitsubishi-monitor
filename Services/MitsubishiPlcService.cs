@@ -2597,7 +2597,9 @@ namespace MitsubishiMonitor.Demo.Services
                     ref _lastAuxiliarySampleTimestamp,
                     System.Diagnostics.Stopwatch.GetTimestamp());
                 session.AuxiliaryFailures = 0;
-                UpdateTemperatureAlarmState(temperature);
+                // 辅助读取跨越多个 await，传入温度可能早于最新主样本。
+                // 只在提交锁内根据当前温度刷新告警，不能用旧轮次清除新报警。
+                UpdateTemperatureAlarmState(_status.Temperature);
             }
         }
 

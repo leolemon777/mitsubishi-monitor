@@ -496,14 +496,19 @@ namespace MitsubishiMonitor.Demo
         }
 
         private static void WriteDocumentAtomic(ConfigurationDocument document)
+            => WriteDocumentAtomic(document, ConfigFilePath);
+
+        internal static void WriteDocumentAtomic(ConfigurationDocument document, string configFilePath)
         {
-            var directory = Path.GetDirectoryName(ConfigFilePath)
+            var directory = Path.GetDirectoryName(configFilePath)
                 ?? throw new InvalidOperationException("无法确定配置目录");
             Directory.CreateDirectory(directory);
 
             var temporaryPath = Path.Combine(
                 directory,
-                $".{Path.GetFileName(ConfigFilePath)}.{Guid.NewGuid():N}.tmp");
+                $".{Path.GetFileName(configFilePath)}.{Guid.NewGuid():N}.tmp");
+            var backupFilePath = configFilePath + ".last-known-good";
+            var backupTemporaryPath = backupFilePath + ".pending-" + Guid.NewGuid().ToString("N");
 
             try
             {
@@ -513,32 +518,27 @@ namespace MitsubishiMonitor.Demo
                 if (!TryReadValidatedDocument(temporaryPath, out _, out var validationError))
                     throw new InvalidOperationException($"配置落盘校验失败：{validationError}");
 
-                if (File.Exists(ConfigFilePath))
-                {
-                    var replacementBackupPath = BackupConfigFilePath +
-                        ".pending-" + Guid.NewGuid().ToString("N");
-                    try
-                    {
-                        // File.Replace 先把旧主配置保存到唯一候选备份。主配置替换成功后再覆盖
-                        // 固定备份名；若第二步失败，原 last-known-good 仍然保留。
-                        File.Replace(temporaryPath, ConfigFilePath, replacementBackupPath, true);
-                        File.Move(replacementBackupPath, BackupConfigFilePath, overwrite: true);
-                    }
-                    finally
-                    {
-                        if (File.Exists(replacementBackupPath))
-                            File.Delete(replacementBackupPath);
-                    }
-                }
+                // 备份只能来自已通过语义校验的配置。主文件损坏时保留有效回退，
+                // 两者都无效时使用本次已验证的新配置。先完成备份，避免保存报错却已改主文件。
+                if (!TryReadValidatedDocument(configFilePath, out var backupDocument, out _) &&
+                    !TryReadValidatedDocument(backupFilePath, out backupDocument, out _))
+                    backupDocument = document;
+                File.WriteAllText(backupTemporaryPath, JsonSerializer.Serialize(backupDocument, JsonOptions));
+                if (!TryReadValidatedDocument(backupTemporaryPath, out _, out var backupError))
+                    throw new InvalidOperationException($"配置备份校验失败：{backupError}");
+                File.Move(backupTemporaryPath, backupFilePath, overwrite: true);
+
+                if (File.Exists(configFilePath))
+                    File.Replace(temporaryPath, configFilePath, null, true);
                 else
-                {
-                    File.Move(temporaryPath, ConfigFilePath);
-                }
+                    File.Move(temporaryPath, configFilePath);
             }
             finally
             {
                 if (File.Exists(temporaryPath))
                     File.Delete(temporaryPath);
+                if (File.Exists(backupTemporaryPath))
+                    File.Delete(backupTemporaryPath);
             }
         }
 
